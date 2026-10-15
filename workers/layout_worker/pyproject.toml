@@ -1,0 +1,36 @@
+[project]
+name = "layout-worker"
+version = "0.1.0"
+description = "PP-DocLayoutV3 page segmentation worker for pdf2fb2 (own venv: PaddlePaddle GPU)."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "paddlepaddle-gpu==3.3.1",  # cu129 build: needed for RTX 50xx (Blackwell, sm_120)
+    "paddleocr[doc-parser]>=3.7.0,<4",
+    "worker-protocol",
+]
+
+[dependency-groups]
+dev = ["pip-audit>=2.9,<3"]
+
+[project.scripts]
+layout-worker = "layout_worker.__main__:run_worker"
+
+[tool.uv]
+# Supply-chain safety: ignore package versions published in the last 7 days.
+exclude-newer = "7 days"
+# The Paddle index publishes no upload dates; paddlepaddle-gpu is pinned to an exact version instead.
+exclude-newer-package = { paddlepaddle-gpu = false }
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[[tool.uv.index]]
+name = "paddle-cu129"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+explicit = true
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddle-cu129" }
+worker-protocol = { path = "../worker_protocol", editable = true }
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

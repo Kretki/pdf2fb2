@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+models
+test_res
+test.sh
+*.pdf
+# Conversion output and uv lock temp files
+pdf2fb2_output
+*.tmp
+.ruff_cache

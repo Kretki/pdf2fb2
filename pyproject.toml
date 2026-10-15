@@ -1,0 +1,59 @@
+[project]
+name = "pdf2fb2"
+version = "0.2.0"
+description = "PDF -> FB2 converter: PP-DocLayoutV3 segmentation + Qianfan-OCR, each model in its own venv."
+readme = "README.md"
+authors = [
+    { email = "o.balala@gmail.com" }
+]
+requires-python = ">=3.10,<3.13"
+# Orchestrator only: no ML frameworks here. Paddle lives in workers/layout_worker,
+# torch/transformers in workers/ocr_worker (each with its own .venv).
+dependencies = [
+    "pymupdf>=1.26,<2",
+    "pillow>=11,<13",
+    "worker-protocol",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.13,<1",
+    "bandit[toml]>=1.8,<2",
+    "pip-audit>=2.9,<3",
+    "semgrep>=1.130,<2",
+]
+
+[project.scripts]
+pdf2fb2 = "pdf2fb2.command_line:run_command_line"
+
+[tool.uv]
+# Supply-chain safety: ignore package versions published in the last 7 days.
+exclude-newer = "7 days"
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]  # resolve only for your platform
+
+[tool.uv.sources]
+worker-protocol = { path = "workers/worker_protocol", editable = true }
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["models", "test_res", "pdf2fb2_output"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "N", "UP", "S"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker"]
+
+[tool.bandit]
+exclude_dirs = [
+    ".venv",
+    "workers/layout_worker/.venv",
+    "workers/ocr_worker/.venv",
+    "workers/worker_protocol/.venv",
+    "models",
+]
