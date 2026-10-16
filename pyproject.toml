@@ -58,7 +58,8 @@ select = ["E", "F", "W", "I", "B", "N", "UP", "S"]
 "unit_tests/*" = ["S101"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker", "readermarks", "textar_worker"]
+known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker", "readermarks", "textar_worker",
+                     "proofread_worker"]
 
 [tool.bandit]
 exclude_dirs = [

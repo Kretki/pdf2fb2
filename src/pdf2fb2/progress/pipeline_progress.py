@@ -8,12 +8,13 @@ SEGMENTATION_STAGE = "segmentation"
 DRAWING_STAGE = "drawing"
 RECOGNITION_STAGE = "recognition"
 STYLING_STAGE = "styling"
+PROOFREADING_STAGE = "proofreading"
 RESCAN_SEGMENTATION_STAGE = "rescan_segmentation"
 ASSEMBLING_STAGE = "assembling"
 
 # Rough share of the run time of each stage; OCR dominates on real books.
 STAGE_WEIGHTS = {RENDERING_STAGE: 6.0, SEGMENTATION_STAGE: 22.0, RECOGNITION_STAGE: 65.0, CLEANING_STAGE: 6.0,
-                 RESCAN_SEGMENTATION_STAGE: 4.0, STYLING_STAGE: 4.0, DRAWING_STAGE: 3.0,
+                 RESCAN_SEGMENTATION_STAGE: 4.0, STYLING_STAGE: 4.0, PROOFREADING_STAGE: 15.0, DRAWING_STAGE: 3.0,
                  ASSEMBLING_STAGE: 4.0}
 
 

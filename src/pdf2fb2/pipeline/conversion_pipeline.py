@@ -1,12 +1,13 @@
 """Runs the full PDF -> FB2 conversion over injected model stages."""
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from pdf2fb2.fb2_output.fb2_document import BookOptions, build_fb2_document
-from pdf2fb2.pipeline.quality_checks import check_segment_boxes, validate_fb2_file
+from pdf2fb2.fb2_output.fb2_document import BookOptions
+from pdf2fb2.pipeline.book_assembly import AssemblyProgress, AssemblyRequest, BookAssembler
+from pdf2fb2.pipeline.quality_checks import check_segment_boxes
 from pdf2fb2.pipeline.stage_contracts import (
+    FlowChecker,
     MarkedPageRescanner,
     PageSegmenter,
     RescanProgress,
@@ -17,6 +18,7 @@ from pdf2fb2.progress.pipeline_progress import (
     ASSEMBLING_STAGE,
     CLEANING_STAGE,
     DRAWING_STAGE,
+    PROOFREADING_STAGE,
     RECOGNITION_STAGE,
     RENDERING_STAGE,
     RESCAN_SEGMENTATION_STAGE,
@@ -31,8 +33,6 @@ from pdf2fb2.text_styling.style_markup import apply_word_styles
 
 PAGES_DIRECTORY = "pages"
 VISUALIZATION_DIRECTORY = "vis"
-SEGMENTS_FILE = "segments.json"
-ASSEMBLING_STEPS = 3
 
 
 @dataclass(frozen=True)
@@ -69,13 +69,15 @@ class ConversionOutcome:
     drawings_directory: Path | None
 
 
-def active_stage_names(draw_segments: bool, clean_marks: bool = False, detect_styles: bool = False) -> list[str]:
+def active_stage_names(draw_segments: bool, clean_marks: bool = False, detect_styles: bool = False,
+                       proofread_text: bool = False) -> list[str]:
     """List the progress stages of a conversion in execution order.
 
     Args:
         draw_segments: Whether segmentation drawings are produced.
         clean_marks: Whether reader marks are removed (cleaning + re-segmentation of marked pages before OCR).
         detect_styles: Whether word styles (bold/italic/strikeout) are detected after OCR.
+        proofread_text: Whether the book text is proofread with the language model before rendering.
 
     Returns:
         Stage names for ``PipelineProgress``.
@@ -83,8 +85,9 @@ def active_stage_names(draw_segments: bool, clean_marks: bool = False, detect_st
     rescan_stages = [CLEANING_STAGE, RESCAN_SEGMENTATION_STAGE] if clean_marks else []
     styling_stages = [STYLING_STAGE] if detect_styles else []
     optional_stages = [DRAWING_STAGE] if draw_segments else []
+    proofreading_stages = [PROOFREADING_STAGE] if proofread_text else []
     return [RENDERING_STAGE, SEGMENTATION_STAGE, *rescan_stages, RECOGNITION_STAGE, *styling_stages,
-            *optional_stages, ASSEMBLING_STAGE]
+            *optional_stages, *proofreading_stages, ASSEMBLING_STAGE]
 
 
 def rescan_trackers(pipeline_progress: PipelineProgress) -> RescanProgress:
@@ -122,33 +125,6 @@ def draw_overlays(page_records: list[dict], output_directory: Path, stage_progre
     return drawings_directory
 
 
-def assemble_book(conversion_request: ConversionRequest, page_records: list[dict],
-                  stage_progress: StageProgress) -> tuple[Path, dict, list[str]]:
-    """Save the segments, build and write the FB2, then validate it.
-
-    Args:
-        conversion_request: Conversion settings.
-        page_records: OCR'd page records.
-        stage_progress: Receives one update per step.
-
-    Returns:
-        ``(fb2_path, statistics, validation_problems)``.
-    """
-    output_directory = conversion_request.output_directory
-    stage_progress.advance_stage(0, ASSEMBLING_STEPS, f"saving {SEGMENTS_FILE}")
-    (output_directory / SEGMENTS_FILE).write_text(json.dumps(page_records, ensure_ascii=False, indent=1),
-                                                  encoding="utf-8")
-    stage_progress.advance_stage(1, ASSEMBLING_STEPS, "building FB2 document")
-    fb2_markup, book_statistics = build_fb2_document(conversion_request.pdf_path, page_records,
-                                                  conversion_request.book_options)
-    fb2_path = output_directory / f"{conversion_request.pdf_path.stem}.fb2"
-    fb2_path.write_text(fb2_markup, encoding="utf-8")
-    stage_progress.advance_stage(2, ASSEMBLING_STEPS, "validating FB2")
-    validation_problems = validate_fb2_file(fb2_path)
-    stage_progress.advance_stage(ASSEMBLING_STEPS, ASSEMBLING_STEPS, "FB2 written")
-    return fb2_path, book_statistics, validation_problems
-
-
 def report_outcome(conversion_outcome: ConversionOutcome) -> int:
     """Print the conversion summary.
 
@@ -171,7 +147,7 @@ def report_outcome(conversion_outcome: ConversionOutcome) -> int:
 
 
 class ConversionPipeline:
-    """Render -> segment -> [clean marks + re-segment] -> OCR -> [word styles] -> FB2 -> checks, one progress display.
+    """Render -> segment -> [clean marks + re-segment] -> OCR -> [styles] -> [proofreading] -> FB2.
 
     Usage:
         Build with injected stages and display (see ``command_line``) and call ``convert_document``.
@@ -179,7 +155,7 @@ class ConversionPipeline:
 
     def __init__(self, page_segmenter: PageSegmenter, segment_recognizer: SegmentRecognizer,
                  progress_display: ProgressDisplay, mark_rescanner: MarkedPageRescanner | None = None,
-                 style_detector: TextStyleDetector | None = None) -> None:
+                 style_detector: TextStyleDetector | None = None, flow_checker: FlowChecker | None = None) -> None:
         """Store the stages.
 
         Args:
@@ -188,7 +164,10 @@ class ConversionPipeline:
             progress_display: Shows the overall progress and the current step.
             mark_rescanner: Cleans pages with reader marks and re-segments them before OCR, or None to skip.
             style_detector: Detects word bold/italic/strikeout in text segments, or None to skip.
+            flow_checker: Proofreads and rearranges the book flow with a language model, or None to skip.
         """
+        self._book_assembler = BookAssembler(flow_checker)
+        self._proofread_text = flow_checker is not None
         self._mark_rescanner = mark_rescanner
         self._style_detector = style_detector
         self._page_segmenter = page_segmenter
@@ -211,7 +190,8 @@ class ConversionPipeline:
         pipeline_progress = PipelineProgress(self._progress_display,
                                              active_stage_names(conversion_request.draw_segments,
                                                                 self._mark_rescanner is not None,
-                                                                self._style_detector is not None))
+                                                                self._style_detector is not None,
+                                                                self._proofread_text))
         conversion_finished = False
         try:
             conversion_outcome = self._run_stages(conversion_request, pipeline_progress)
@@ -238,8 +218,11 @@ class ConversionPipeline:
         if conversion_request.draw_segments:
             drawings_directory = draw_overlays(page_records, output_directory,
                                                pipeline_progress.stage_tracker(DRAWING_STAGE))
-        fb2_path, book_statistics, validation_problems = assemble_book(
-            conversion_request, page_records, pipeline_progress.stage_tracker(ASSEMBLING_STAGE))
+        fb2_path, book_statistics, validation_problems = self._book_assembler.assemble_book(
+            AssemblyRequest(conversion_request.pdf_path, output_directory, conversion_request.book_options),
+            page_records, AssemblyProgress(
+                pipeline_progress.stage_tracker(ASSEMBLING_STAGE),
+                pipeline_progress.stage_tracker(PROOFREADING_STAGE) if self._proofread_text else None))
         return ConversionOutcome(fb2_path, book_statistics, detected_problems + validation_problems,
                                  drawings_directory)
 

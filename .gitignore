@@ -15,6 +15,7 @@ models/Qianfan-OCR/*
 models/readermarks/*
 models/doctr/*
 models/textar/*
+models/qwen3.5-9B/*
 readermarks_data
 test_res
 test.sh

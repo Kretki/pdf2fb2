@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from pdf2fb2.fb2_output.flow_model import BookFlow
 from pdf2fb2.progress.progress_contracts import StageProgress
 
 
@@ -112,5 +113,22 @@ class MarkedPageRescanner(Protocol):
         Returns:
             Final segmented page records in page order (rescanned pages replaced, pictures kept from the
             first pass), ready for OCR.
+        """
+        ...
+
+
+class FlowChecker(Protocol):
+    """Proofreads the book flow and rearranges it (removes text that does not belong to the book)."""
+
+    def proofread_flow(self, book_flow: BookFlow, work_directory: Path, stage_progress: StageProgress) -> dict:
+        """Check every token of the flow text and apply the decided edits.
+
+        Args:
+            book_flow: Built flow (mutated).
+            work_directory: Output directory for job, result and report files.
+            stage_progress: Receives proofreading progress.
+
+        Returns:
+            Summary counts of the edits.
         """
         ...

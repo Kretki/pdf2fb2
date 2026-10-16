@@ -159,11 +159,72 @@ def collect_statistics(book_flow: BookFlow, binary_store: BinaryStore) -> dict:
             "notes_linked": sum(1 for footnote in book_flow.footnotes if footnote["linked"])}
 
 
-def build_fb2_document(pdf_path: Path, page_records: list[dict], book_options: BookOptions) -> tuple[str, dict]:
-    """Build the FB2 XML for OCR'd pages.
+@dataclass
+class PreparedBook:
+    """Book content before rendering: the flow (editable, e.g. by proofreading) plus its pictures.
+
+    Attributes:
+        book_flow: Flow items, notes and detected title.
+        binary_store: Pictures, including the cover.
+        pdf_metadata: PyMuPDF metadata of the source PDF.
+    """
+
+    book_flow: BookFlow
+    binary_store: BinaryStore
+    pdf_metadata: dict
+
+
+def prepare_book(pdf_path: Path, page_records: list[dict], book_options: BookOptions) -> PreparedBook:
+    """Build the flow, the pictures and the cover of a book.
 
     Usage:
-        Final assembly step of the pipeline.
+        First assembly step; edit ``book_flow`` if needed, then call ``render_prepared_book``.
+
+    Args:
+        pdf_path: Source PDF (pictures, cover and metadata come from it).
+        page_records: OCR'd page records in page order.
+        book_options: FB2 settings.
+
+    Returns:
+        The prepared book.
+    """
+    binary_store = BinaryStore()
+    with pymupdf.open(pdf_path) as pdf_document:
+        book_flow = build_book_flow(page_records, pdf_document, binary_store,
+                                    book_options.segmentation_dpi, book_options.image_dpi)
+        pdf_metadata = pdf_document.metadata or {}
+        binary_store.add_image(COVER_BINARY_ID, render_cover_image(pdf_document))
+    return PreparedBook(book_flow=book_flow, binary_store=binary_store, pdf_metadata=pdf_metadata)
+
+
+def render_prepared_book(prepared_book: PreparedBook, pdf_path: Path, book_options: BookOptions) -> tuple[str, dict]:
+    """Render the FB2 XML of a prepared book.
+
+    Args:
+        prepared_book: Result of ``prepare_book`` (possibly edited).
+        pdf_path: Source PDF (its stem is the last-resort title).
+        book_options: FB2 settings.
+
+    Returns:
+        ``(fb2_markup, statistics)``.
+    """
+    book_flow, binary_store = prepared_book.book_flow, prepared_book.binary_store
+    book_title = _choose_title(book_options, book_flow, prepared_book.pdf_metadata, pdf_path)
+    author_text = book_options.author_name or (prepared_book.pdf_metadata.get("author") or "").strip()
+    body_xml = render_body_sections(book_flow.flow_items, book_options.page_marker_mode)
+    fb2_markup = "".join([
+        XML_DECLARATION, f'<FictionBook xmlns="{FB2_NAMESPACE}" xmlns:l="{XLINK_NAMESPACE}">',
+        _description_xml(book_options, book_title, author_text),
+        f"<body><title><p>{markdown_to_fb2_inline(book_title)}</p></title>{body_xml}</body>",
+        _notes_body_xml(book_flow.footnotes), _binaries_xml(binary_store), "</FictionBook>"])
+    return fb2_markup, collect_statistics(book_flow, binary_store)
+
+
+def build_fb2_document(pdf_path: Path, page_records: list[dict], book_options: BookOptions) -> tuple[str, dict]:
+    """Build the FB2 XML for OCR'd pages without any editing step.
+
+    Usage:
+        Final assembly step when no proofreading is wanted.
 
     Args:
         pdf_path: Source PDF (pictures, cover and metadata come from it).
@@ -173,18 +234,4 @@ def build_fb2_document(pdf_path: Path, page_records: list[dict], book_options: B
     Returns:
         ``(fb2_markup, statistics)``.
     """
-    binary_store = BinaryStore()
-    with pymupdf.open(pdf_path) as pdf_document:
-        book_flow = build_book_flow(page_records, pdf_document, binary_store,
-                                    book_options.segmentation_dpi, book_options.image_dpi)
-        pdf_metadata = pdf_document.metadata or {}
-        binary_store.add_image(COVER_BINARY_ID, render_cover_image(pdf_document))
-    book_title = _choose_title(book_options, book_flow, pdf_metadata, pdf_path)
-    author_text = book_options.author_name or (pdf_metadata.get("author") or "").strip()
-    body_xml = render_body_sections(book_flow.flow_items, book_options.page_marker_mode)
-    fb2_markup = "".join([
-        XML_DECLARATION, f'<FictionBook xmlns="{FB2_NAMESPACE}" xmlns:l="{XLINK_NAMESPACE}">',
-        _description_xml(book_options, book_title, author_text),
-        f"<body><title><p>{markdown_to_fb2_inline(book_title)}</p></title>{body_xml}</body>",
-        _notes_body_xml(book_flow.footnotes), _binaries_xml(binary_store), "</FictionBook>"])
-    return fb2_markup, collect_statistics(book_flow, binary_store)
+    return render_prepared_book(prepare_book(pdf_path, page_records, book_options), pdf_path, book_options)

@@ -3,9 +3,11 @@
 PDF → FB2 converter. Pages are segmented with **PP-DocLayoutV3** (PaddlePaddle) and every
 text/title/table/footnote segment is read with **Qianfan-OCR** (PyTorch/transformers, 192 languages).
 Bold, italic and strikeout words are detected with **TexTAR** (ICDAR 2025) and kept in the FB2.
+Before the FB2 is written, a local **Qwen3.5-9B** checks every token of the text and removes what does
+not belong to the book (stray symbols, page numbers, running heads taken for headings).
 
 PaddlePaddle GPU and PyTorch CUDA cannot share one environment, so the project is split into
-five uv projects, each with its own `.venv`:
+six uv projects, each with its own `.venv`:
 
 | Directory | venv contents | Role |
 |-----------|---------------|------|
@@ -14,6 +16,7 @@ five uv projects, each with its own `.venv`:
 | `workers/ocr_worker` | `torch`/`torchvision` (cu130, needs NVIDIA driver ≥ 580), `transformers`, `accelerate` | Qianfan-OCR recognition |
 | `workers/readermarks_worker` | `torch` (cu130), `timm`, `segmentation-models-pytorch`, OpenCV | handwritten reader-mark removal before OCR, then re-segmentation (see its README) |
 | `workers/textar_worker` | `torch`/`torchvision` (cu130), `python-doctr` | word boxes (docTR DBNet) + TexTAR word attributes |
+| `workers/proofread_worker` | `torch` (cu130), `transformers`, `bitsandbytes`, `flash-linear-attention` | Qwen3.5-9B (4-bit, ~8 GB VRAM) token probabilities and deletion tests |
 | `workers/worker_protocol` | stdlib only (installed into every worker) | JSON job-file contract |
 
 The orchestrator starts each worker as a child process with that worker's own interpreter
@@ -30,6 +33,7 @@ hf download baidu/Qianfan-OCR          --local-dir models/Qianfan-OCR
 hf download Tex-TAR/model_tex-tar      --local-dir models/textar        # TexTAR-trained.pt
 mkdir -p models/doctr && curl -L -o models/doctr/db_resnet50-79bd7d70.pt \
     'https://doctr-static.mindee.com/models?id=v0.7.0/db_resnet50-79bd7d70.pt&src=0'  # docTR word detector
+hf download Qwen/Qwen3.5-9B           --local-dir models/qwen3.5-9B    # proofreading language model
 ```
 
 Environments:
@@ -42,9 +46,11 @@ uv sync --project workers/layout_worker
 uv sync --project workers/ocr_worker
 uv sync --project workers/readermarks_worker
 uv sync --project workers/textar_worker
+uv sync --project workers/proofread_worker
 ```
 
-Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OCR_PYTHON` / `PDF2FB2_MARKS_PYTHON` / `PDF2FB2_STYLE_PYTHON`.
+Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OCR_PYTHON` / `PDF2FB2_MARKS_PYTHON` / `PDF2FB2_STYLE_PYTHON` /
+`PDF2FB2_PROOFREAD_PYTHON`.
 
 ## Pipeline
 
@@ -67,10 +73,26 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
    on pages where italic words dominate 3:1; specks are ignored; a style covering a whole heading
    or caption is dropped; tables, the book title and numbers are never styled; FB2 has no
    underline, so underlines are not applied. The unstyled OCR text stays in `ocr_text`.
-8. FB2 assembly and checks.
+8. The book flow (paragraphs, headings, captions in reading order) is built.
+9. Proofreading (`workers/proofread_worker`, `models/qwen3.5-9B`, 4-bit): every token of the flow
+   text gets its probability from the preceding text (`proofread_report.json`: per word and per
+   token). Suspicious spots are then tested by scoring the following words with and without them:
+   every word whose least probable token is below e^-9, every heading, every paragraph of at most
+   6 words, and every paragraph break after an unfinished sentence.
+   * A word or short paragraph is deleted only when it is far better explained as OCR noise than as
+     text (log-odds = continuation gain − ln 60 per character − its own log-probability + prior,
+     prior −6 for letters, −1 for symbols; delete above 3). A misread word that still fits keeps a
+     high probability for its length and stays unchanged; lone hyphens and note links are never cut.
+   * A heading is deleted when the text reads on without it (continuation gain, +2 inside an
+     unfinished sentence, +3 when the heading text repeats, +12 when it heads 10+ pages: a running
+     head); when the sentence runs through it, the paragraphs on both sides are re-joined, which also
+     removes the wrong section split.
+   * A paragraph break is removed when the joined text is more probable by 2 nats or more.
+10. FB2 rendering and checks.
 
 `--keep-marks` skips steps 3–4, `--debug-marks` writes `marks/<page>/debug.png` overlays,
-`--no-styles` skips steps 6–7 (`--textar-model-dir`, `--doctr-model-dir` change the weight folders).
+`--no-styles` skips steps 6–7 (`--textar-model-dir`, `--doctr-model-dir` change the weight folders),
+`--no-proofread` skips step 9 (`--proofread-model-dir` changes the language model folder).
 
 ## Usage
 
@@ -90,14 +112,15 @@ When output is redirected, a line is printed every 10% instead.
 Output directory: `pages/` (renders), `vis/` (segmentation drawings), `ocr_crops/`,
 `layout_job.json`/`layout_result.json`, `ocr_job.json`/`ocr_results.jsonl`, `ocr_cache.json`
 (re-runs skip already read segments; cleaned pages have their own keys), `marks/` + `marks_job.json`/`marks_result.json` (reader marks),
-`rescan/` (cleaned pages with their own layout files), `style_job.json`/`style_result.json` (word styles), `segments.json` (final records, rescanned
+`rescan/` (cleaned pages with their own layout files), `style_job.json`/`style_result.json` (word styles),
+`proofread_job.json`/`proofread_result.json`/`proofread_report.json` (token probabilities, edits and reasons), `segments.json` (final records, rescanned
 pages flagged `"rescanned": true`) and `<name>.fb2`. Worker output (model loading, warnings,
-tracebacks) goes to `layout_job.log` / `ocr_job.log` / `marks_job.log` / `style_job.log`.
+tracebacks) goes to `layout_job.log` / `ocr_job.log` / `marks_job.log` / `style_job.log` / `proofread_job.log`.
 
 Source layout (`src/pdf2fb2`): `interface/` (CLI, argument validation, self-test PDF), `pipeline/`
 (orchestration, stage contracts, reader-mark rescan and page merging, checks), `model_stages/`
 (layout, OCR, reader-mark and text-style worker stages), `text_styling/` (word order, token alignment,
-style clean-up and markup), `worker_runtime/` (worker venvs and launcher), `progress/`,
+style clean-up and markup), `proofreading/` (flow blocks, test selection, edit decisions, flow edits, report), `worker_runtime/` (worker venvs and launcher), `progress/`,
 `rendering/` (PDF rendering, crops, drawings), `segments/` (segment geometry, label roles),
 `fb2_output/` (FB2 assembly).
 
@@ -113,8 +136,10 @@ uv run --project workers/layout_worker pip-audit
 uv run --project workers/ocr_worker pip-audit   # torch/paddle wheels come from their own indexes and are skipped
 uv run --project workers/readermarks_worker pip-audit
 uv run --project workers/textar_worker pip-audit
+uv run --project workers/proofread_worker pip-audit
 workers/readermarks_worker/.venv/bin/python -m pytest workers/readermarks_worker
 (cd workers/textar_worker && uv run pytest)
+(cd workers/proofread_worker && uv run pytest)
 uv run pytest                                    # root unit_tests/
 shellcheck scripts/*.sh
 trivy fs --scanners vuln,secret,misconfig --severity MEDIUM,HIGH,CRITICAL --exit-code 1 \

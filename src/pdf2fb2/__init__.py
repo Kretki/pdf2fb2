@@ -9,8 +9,10 @@ Pipeline (orchestrated in ``pipeline.conversion_pipeline``):
      -> ``workers/ocr_worker`` (PyTorch venv).
   5. Detect word boxes (docTR) and their bold/italic/underline/strikeout (TexTAR) inside the text
      segments -> ``workers/textar_worker``; apply them to the OCR text (``text_styling``).
-  6. Assemble an FB2 book (sections, tables, images, footnotes, cover), in this venv.
-  7. Draw segmentation boxes per page and run sanity checks.
+  6. Build the book flow; proofread it with Qwen3.5-9B -> ``workers/proofread_worker`` (token
+     probabilities, deletion tests) and remove words, headings and breaks that do not belong (``proofreading``).
+  7. Render the FB2 book (sections, tables, images, footnotes, cover), in this venv.
+  8. Draw segmentation boxes per page and run sanity checks.
 
 Workers are separate processes with their own virtual environments and talk to
 this package only through JSON job files (``worker_protocol``).
