@@ -13,6 +13,8 @@ models/dinov2-small/*
 models/PP-DocLayoutV3/*
 models/Qianfan-OCR/*
 models/readermarks/*
+models/doctr/*
+models/textar/*
 readermarks_data
 test_res
 test.sh

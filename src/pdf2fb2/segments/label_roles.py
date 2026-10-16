@@ -54,3 +54,25 @@ def ocr_token_limit(segment_label: str) -> int:
         Maximum number of new tokens (8192 for tables, 2048 otherwise).
     """
     return OCR_TOKEN_LIMITS.get(segment_label, DEFAULT_OCR_TOKEN_LIMIT)
+
+
+# Word styles (TexTAR) are not applied to these: tables keep their own markup, the document title
+# goes into the FB2 metadata, page numbers and formulas carry no emphasis.
+UNSTYLED_LABELS = frozenset({TABLE_LABEL, DOCUMENT_TITLE_LABEL}) | PAGE_NUMBER_LABELS | DROPPED_LABELS
+# A style that covers a whole heading or caption is its typography, not emphasis: it is dropped.
+UNIFORM_STYLE_DROPPED_LABELS = HEADING_LABELS | CAPTION_LABELS
+
+
+def receives_word_styles(segment_label: str) -> bool:
+    """Tell whether bold/italic/strikeout detected by TexTAR is applied to a segment's text.
+
+    Usage:
+        Call when collecting the text regions for the style stage and when applying its result.
+
+    Args:
+        segment_label: PP-DocLayoutV3 label of the segment.
+
+    Returns:
+        True for OCR'd text segments except tables, the document title, page numbers and formulas.
+    """
+    return requires_ocr(segment_label) and segment_label not in UNSTYLED_LABELS

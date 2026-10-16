@@ -66,6 +66,24 @@ class SegmentRecognizer(Protocol):
         ...
 
 
+class TextStyleDetector(Protocol):
+    """Detects word-level text attributes (bold, italic, underline, strikeout) inside text segments."""
+
+    def detect_text_styles(self, page_records: list[dict], work_directory: Path,
+                           stage_progress: StageProgress) -> None:
+        """Store the detected words with their attributes in the ``words`` field of the text segments.
+
+        Args:
+            page_records: Final segmented page records (mutated).
+            work_directory: Output directory used for job and result files.
+            stage_progress: Receives per-page progress.
+
+        Returns:
+            None.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RescanProgress:
     """Progress sinks of the two steps of the reader-mark rescan.

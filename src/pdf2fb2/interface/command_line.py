@@ -27,12 +27,19 @@ from pdf2fb2.interface.selftest_document import create_selftest_pdf
 from pdf2fb2.model_stages.layout_stage import LayoutStage
 from pdf2fb2.model_stages.marks_stage import MarksStage
 from pdf2fb2.model_stages.ocr_stage import OcrBackendSettings, OcrStage
+from pdf2fb2.model_stages.style_stage import StyleStage
 from pdf2fb2.pipeline.conversion_pipeline import ConversionPipeline, ConversionRequest
 from pdf2fb2.pipeline.mark_rescan import MarkRescanner
 from pdf2fb2.progress.progress_contracts import ProgressDisplay
 from pdf2fb2.progress.terminal_progress import create_progress_display
-from pdf2fb2.project_paths import LAYOUT_MODEL_DIRECTORY, QIANFAN_MODEL_DIRECTORY, READERMARKS_CHECKPOINT_DIRECTORY
-from pdf2fb2.worker_runtime.worker_environment import LAYOUT_WORKER, MARKS_WORKER, OCR_WORKER
+from pdf2fb2.project_paths import (
+    DOCTR_DETECTOR_DIRECTORY,
+    LAYOUT_MODEL_DIRECTORY,
+    QIANFAN_MODEL_DIRECTORY,
+    READERMARKS_CHECKPOINT_DIRECTORY,
+    TEXTAR_MODEL_DIRECTORY,
+)
+from pdf2fb2.worker_runtime.worker_environment import LAYOUT_WORKER, MARKS_WORKER, OCR_WORKER, STYLE_WORKER
 from pdf2fb2.worker_runtime.worker_launcher import SubprocessWorkerLauncher, WorkerFailedError
 from worker_protocol.ocr_job_schema import HTTP_BACKEND, MAX_PARALLEL_REQUESTS, TRANSFORMERS_BACKEND
 
@@ -73,6 +80,12 @@ def _add_marks_arguments(argument_parser: argparse.ArgumentParser) -> None:
                                  default=None, help="readermarks checkpoints (default models/readermarks)")
     argument_parser.add_argument("--debug-marks", dest="debug_marks", action="store_true",
                                  help="write marks/<page>/debug.png overlays")
+    argument_parser.add_argument("--no-styles", dest="skip_styles", action="store_true",
+                                 help="skip TexTAR word styles (bold/italic/strikeout) in the FB2")
+    argument_parser.add_argument("--textar-model-dir", dest="textar_model_directory", type=parse_existing_directory,
+                                 default=TEXTAR_MODEL_DIRECTORY, help="TexTAR checkpoint directory")
+    argument_parser.add_argument("--doctr-model-dir", dest="doctr_model_directory", type=parse_existing_directory,
+                                 default=DOCTR_DETECTOR_DIRECTORY, help="docTR db_resnet50 word detector weights")
 
 
 def _add_book_arguments(argument_parser: argparse.ArgumentParser) -> None:
@@ -155,7 +168,10 @@ def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: Progr
                                  parsed_arguments.marks_model_directory or READERMARKS_CHECKPOINT_DIRECTORY,
                                  parsed_arguments.device_name, parsed_arguments.debug_marks)
         mark_rescanner = MarkRescanner(marks_stage, layout_stage)
-    return ConversionPipeline(layout_stage, ocr_stage, progress_display, mark_rescanner)
+    style_stage = None if parsed_arguments.skip_styles else StyleStage(
+        worker_launcher, STYLE_WORKER, parsed_arguments.textar_model_directory,
+        parsed_arguments.doctr_model_directory, parsed_arguments.device_name)
+    return ConversionPipeline(layout_stage, ocr_stage, progress_display, mark_rescanner, style_stage)
 
 
 def build_request(parsed_arguments: argparse.Namespace, pdf_path: Path) -> ConversionRequest:

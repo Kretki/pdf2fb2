@@ -6,7 +6,13 @@ from pathlib import Path
 
 from pdf2fb2.fb2_output.fb2_document import BookOptions, build_fb2_document
 from pdf2fb2.pipeline.quality_checks import check_segment_boxes, validate_fb2_file
-from pdf2fb2.pipeline.stage_contracts import MarkedPageRescanner, PageSegmenter, RescanProgress, SegmentRecognizer
+from pdf2fb2.pipeline.stage_contracts import (
+    MarkedPageRescanner,
+    PageSegmenter,
+    RescanProgress,
+    SegmentRecognizer,
+    TextStyleDetector,
+)
 from pdf2fb2.progress.pipeline_progress import (
     ASSEMBLING_STAGE,
     CLEANING_STAGE,
@@ -15,11 +21,13 @@ from pdf2fb2.progress.pipeline_progress import (
     RENDERING_STAGE,
     RESCAN_SEGMENTATION_STAGE,
     SEGMENTATION_STAGE,
+    STYLING_STAGE,
     PipelineProgress,
 )
 from pdf2fb2.progress.progress_contracts import ProgressDisplay, StageProgress
 from pdf2fb2.rendering.pdf_rendering import render_pdf_pages
 from pdf2fb2.rendering.segment_drawing import draw_segment_overlay
+from pdf2fb2.text_styling.style_markup import apply_word_styles
 
 PAGES_DIRECTORY = "pages"
 VISUALIZATION_DIRECTORY = "vis"
@@ -61,20 +69,22 @@ class ConversionOutcome:
     drawings_directory: Path | None
 
 
-def active_stage_names(draw_segments: bool, clean_marks: bool = False) -> list[str]:
+def active_stage_names(draw_segments: bool, clean_marks: bool = False, detect_styles: bool = False) -> list[str]:
     """List the progress stages of a conversion in execution order.
 
     Args:
         draw_segments: Whether segmentation drawings are produced.
         clean_marks: Whether reader marks are removed (cleaning + re-segmentation of marked pages before OCR).
+        detect_styles: Whether word styles (bold/italic/strikeout) are detected after OCR.
 
     Returns:
         Stage names for ``PipelineProgress``.
     """
     rescan_stages = [CLEANING_STAGE, RESCAN_SEGMENTATION_STAGE] if clean_marks else []
+    styling_stages = [STYLING_STAGE] if detect_styles else []
     optional_stages = [DRAWING_STAGE] if draw_segments else []
-    return [RENDERING_STAGE, SEGMENTATION_STAGE, *rescan_stages, RECOGNITION_STAGE, *optional_stages,
-            ASSEMBLING_STAGE]
+    return [RENDERING_STAGE, SEGMENTATION_STAGE, *rescan_stages, RECOGNITION_STAGE, *styling_stages,
+            *optional_stages, ASSEMBLING_STAGE]
 
 
 def rescan_trackers(pipeline_progress: PipelineProgress) -> RescanProgress:
@@ -161,14 +171,15 @@ def report_outcome(conversion_outcome: ConversionOutcome) -> int:
 
 
 class ConversionPipeline:
-    """Render -> segment -> [clean marks + re-segment] -> OCR -> FB2 -> checks, with one overall progress display.
+    """Render -> segment -> [clean marks + re-segment] -> OCR -> [word styles] -> FB2 -> checks, one progress display.
 
     Usage:
         Build with injected stages and display (see ``command_line``) and call ``convert_document``.
     """
 
     def __init__(self, page_segmenter: PageSegmenter, segment_recognizer: SegmentRecognizer,
-                 progress_display: ProgressDisplay, mark_rescanner: MarkedPageRescanner | None = None) -> None:
+                 progress_display: ProgressDisplay, mark_rescanner: MarkedPageRescanner | None = None,
+                 style_detector: TextStyleDetector | None = None) -> None:
         """Store the stages.
 
         Args:
@@ -176,8 +187,10 @@ class ConversionPipeline:
             segment_recognizer: OCR stage.
             progress_display: Shows the overall progress and the current step.
             mark_rescanner: Cleans pages with reader marks and re-segments them before OCR, or None to skip.
+            style_detector: Detects word bold/italic/strikeout in text segments, or None to skip.
         """
         self._mark_rescanner = mark_rescanner
+        self._style_detector = style_detector
         self._page_segmenter = page_segmenter
         self._segment_recognizer = segment_recognizer
         self._progress_display = progress_display
@@ -197,7 +210,8 @@ class ConversionPipeline:
         """
         pipeline_progress = PipelineProgress(self._progress_display,
                                              active_stage_names(conversion_request.draw_segments,
-                                                                self._mark_rescanner is not None))
+                                                                self._mark_rescanner is not None,
+                                                                self._style_detector is not None))
         conversion_finished = False
         try:
             conversion_outcome = self._run_stages(conversion_request, pipeline_progress)
@@ -218,12 +232,7 @@ class ConversionPipeline:
             What the conversion produced.
         """
         output_directory = conversion_request.output_directory
-        page_records = self._segment_document(conversion_request, pipeline_progress)
-        if self._mark_rescanner is not None:
-            page_records = self._mark_rescanner.rescan_marked_pages(page_records, output_directory,
-                                                                    rescan_trackers(pipeline_progress))
-        self._segment_recognizer.recognize_segments(page_records, output_directory,
-                                                    pipeline_progress.stage_tracker(RECOGNITION_STAGE))
+        page_records = self._read_document(conversion_request, pipeline_progress)
         detected_problems = check_segment_boxes(page_records)
         drawings_directory = None
         if conversion_request.draw_segments:
@@ -233,6 +242,30 @@ class ConversionPipeline:
             conversion_request, page_records, pipeline_progress.stage_tracker(ASSEMBLING_STAGE))
         return ConversionOutcome(fb2_path, book_statistics, detected_problems + validation_problems,
                                  drawings_directory)
+
+    def _read_document(self, conversion_request: ConversionRequest,
+                       pipeline_progress: PipelineProgress) -> list[dict]:
+        """Segment, clean + re-segment marked pages, OCR the final records and apply word styles.
+
+        Args:
+            conversion_request: What to convert and where.
+            pipeline_progress: Overall progress shared by the stages.
+
+        Returns:
+            Final OCR'd (and styled) page records.
+        """
+        output_directory = conversion_request.output_directory
+        page_records = self._segment_document(conversion_request, pipeline_progress)
+        if self._mark_rescanner is not None:
+            page_records = self._mark_rescanner.rescan_marked_pages(page_records, output_directory,
+                                                                    rescan_trackers(pipeline_progress))
+        self._segment_recognizer.recognize_segments(page_records, output_directory,
+                                                    pipeline_progress.stage_tracker(RECOGNITION_STAGE))
+        if self._style_detector is not None:
+            self._style_detector.detect_text_styles(page_records, output_directory,
+                                                    pipeline_progress.stage_tracker(STYLING_STAGE))
+            apply_word_styles(page_records)
+        return page_records
 
     def _segment_document(self, conversion_request: ConversionRequest,
                           pipeline_progress: PipelineProgress) -> list[dict]:

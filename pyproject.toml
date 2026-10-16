@@ -21,6 +21,7 @@ dev = [
     "bandit[toml]>=1.8,<2",
     "pip-audit>=2.9,<3",
     "semgrep>=1.130,<2",
+    "pytest>=8.4,<10",
 ]
 
 [project.scripts]
@@ -40,6 +41,9 @@ worker-protocol = { path = "workers/worker_protocol", editable = true }
 requires = ["uv_build>=0.13.0,<0.14.0"]
 build-backend = "uv_build"
 
+[tool.pytest.ini_options]
+testpaths = ["unit_tests"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
@@ -51,9 +55,10 @@ select = ["E", "F", "W", "I", "B", "N", "UP", "S"]
 [tool.ruff.lint.per-file-ignores]
 # S101: pytest tests assert by design (false positive for test code).
 "workers/*/unit_tests/*" = ["S101"]
+"unit_tests/*" = ["S101"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker", "readermarks"]
+known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker", "readermarks", "textar_worker"]
 
 [tool.bandit]
 exclude_dirs = [

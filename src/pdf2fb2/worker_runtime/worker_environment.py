@@ -4,7 +4,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from pdf2fb2.project_paths import LAYOUT_WORKER_DIRECTORY, OCR_WORKER_DIRECTORY, READERMARKS_WORKER_DIRECTORY
+from pdf2fb2.project_paths import (
+    LAYOUT_WORKER_DIRECTORY,
+    OCR_WORKER_DIRECTORY,
+    READERMARKS_WORKER_DIRECTORY,
+    TEXTAR_WORKER_DIRECTORY,
+)
 
 
 @dataclass(frozen=True)
@@ -45,3 +50,4 @@ class WorkerEnvironment:
 LAYOUT_WORKER = WorkerEnvironment(LAYOUT_WORKER_DIRECTORY, "layout_worker", "PDF2FB2_LAYOUT_PYTHON")
 OCR_WORKER = WorkerEnvironment(OCR_WORKER_DIRECTORY, "ocr_worker", "PDF2FB2_OCR_PYTHON")
 MARKS_WORKER = WorkerEnvironment(READERMARKS_WORKER_DIRECTORY, "readermarks.job_worker", "PDF2FB2_MARKS_PYTHON")
+STYLE_WORKER = WorkerEnvironment(TEXTAR_WORKER_DIRECTORY, "textar_worker", "PDF2FB2_STYLE_PYTHON")

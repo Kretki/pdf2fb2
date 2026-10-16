@@ -1,7 +1,7 @@
 [project]
 name = "worker-protocol"
 version = "0.1.0"
-description = "Stdlib-only job-file contract shared by pdf2fb2 and its model workers (layout, OCR)."
+description = "Stdlib-only job-file contract shared by pdf2fb2 and its model workers (layout, OCR, reader marks, text styles)."
 requires-python = ">=3.10,<3.13"
 dependencies = []
 

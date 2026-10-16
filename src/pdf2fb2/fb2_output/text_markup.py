@@ -20,7 +20,9 @@ CODE_FENCE_PATTERN = re.compile(r"^\s*```[a-zA-Z]*\s*$", re.M)
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # invalid in XML 1.0
 NOTE_TOKEN_PATTERN = re.compile(r"\x00NOTE:(\w+):([^\x00]+)\x00")
 NOTE_LINK_TEMPLATE = r'<a l:href="#\1" type="note">\2</a>'
-PLAIN_MARKUP_PATTERN = re.compile(r"</?(?:sup|sub|b|i|strong|em)>|\*\*|__|~~|`")
+PLAIN_MARKUP_PATTERN = re.compile(r"</?(?:sup|sub|b|i|s|strong|em|del|strike)>|\*\*|__|~~|`")
+STYLE_TAG_PATTERN = re.compile(r"</?(?:b|i|s)>")  # inserted by text_styling around single words
+ADJACENT_STYLE_PATTERN = re.compile(r"</(strong|emphasis|strikethrough)>(\s*)<\1>")
 MAX_HEADING_DEPTH = 4
 
 # Applied in order to HTML-escaped text; adding a rule never requires touching the others.
@@ -28,6 +30,7 @@ INLINE_MARKUP_RULES = (
     (re.compile(r"&lt;(/?)(sup|sub)&gt;"), r"<\1\2>"),
     (re.compile(r"&lt;(/?)(?:b|strong)&gt;"), r"<\1strong>"),
     (re.compile(r"&lt;(/?)(?:i|em)&gt;"), r"<\1emphasis>"),
+    (re.compile(r"&lt;(/?)(?:s|del|strike)&gt;"), r"<\1strikethrough>"),
     (re.compile(r"&lt;br\s*/?&gt;"), " "),
     (re.compile(r"\*\*(.+?)\*\*"), r"<strong>\1</strong>"),
     (re.compile(r"__(.+?)__"), r"<strong>\1</strong>"),
@@ -70,6 +73,21 @@ def clean_ocr_text(raw_text: str | None) -> str:
     return CONTROL_CHARACTER_PATTERN.sub("", cleaned_text).strip()
 
 
+def visible_text(styled_text: str) -> str:
+    """Text without the word style tags (``<b>``, ``<i>``, ``<s>``) inserted by ``text_styling``.
+
+    Usage:
+        Call before checks that look at the first or last visible characters of a text.
+
+    Args:
+        styled_text: Text, possibly with style tags.
+
+    Returns:
+        The text with those tags removed.
+    """
+    return STYLE_TAG_PATTERN.sub("", styled_text)
+
+
 def join_text_fragments(leading_text: str, trailing_text: str) -> str:
     """Join two pieces of one paragraph, undoing end-of-line hyphenation.
 
@@ -80,9 +98,25 @@ def join_text_fragments(leading_text: str, trailing_text: str) -> str:
     Returns:
         Joined text: hyphen removed if a hyphenated word continues in lowercase, else a space.
     """
-    if HYPHENATED_END_PATTERN.search(leading_text) and trailing_text[:1].islower():
+    if HYPHENATED_END_PATTERN.search(visible_text(leading_text)) and visible_text(trailing_text)[:1].islower():
         return leading_text[:-1] + trailing_text
     return leading_text + " " + trailing_text
+
+
+def merge_adjacent_styles(fb2_markup: str) -> str:
+    """Merge ``</emphasis> <emphasis>``-style pairs left by per-word styling into one element.
+
+    Args:
+        fb2_markup: Converted inline markup.
+
+    Returns:
+        Markup where neighbouring elements of the same style are joined (whitespace kept).
+    """
+    merged_markup = ADJACENT_STYLE_PATTERN.sub(r"\2", fb2_markup)
+    while merged_markup != fb2_markup:
+        fb2_markup = merged_markup
+        merged_markup = ADJACENT_STYLE_PATTERN.sub(r"\2", fb2_markup)
+    return merged_markup
 
 
 def collapse_to_single_line(markdown_text: str) -> str:
@@ -202,6 +236,7 @@ def markdown_to_fb2_inline(markdown_text: str) -> str:
     converted_text = escape_text(markdown_text)
     for markup_pattern, replacement in INLINE_MARKUP_RULES:
         converted_text = markup_pattern.sub(replacement, converted_text)
+    converted_text = merge_adjacent_styles(converted_text)
     if is_well_formed_fragment(converted_text):
         return converted_text
     plain_text = escape_text(PLAIN_MARKUP_PATTERN.sub("", markdown_text))

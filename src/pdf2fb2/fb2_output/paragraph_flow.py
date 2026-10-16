@@ -2,7 +2,7 @@
 
 import re
 
-from pdf2fb2.fb2_output.text_markup import SENTENCE_END_PATTERN, join_text_fragments
+from pdf2fb2.fb2_output.text_markup import SENTENCE_END_PATTERN, join_text_fragments, visible_text
 from pdf2fb2.segments.label_roles import PAGE_NUMBER_LABELS
 
 DIGITS_PATTERN = re.compile(r"\d+")
@@ -40,8 +40,8 @@ def _continues_previous(previous_item: dict | None, paragraph_text: str, paragra
         end a sentence and the new one starts in lowercase.
     """
     return (previous_item is not None and previous_item["kind"] == "p" and previous_item["style"] == paragraph_style
-            and not previous_item["list"] and not is_list_item and paragraph_text[:1].islower()
-            and not SENTENCE_END_PATTERN.search(previous_item["text"]))
+            and not previous_item["list"] and not is_list_item and visible_text(paragraph_text)[:1].islower()
+            and not SENTENCE_END_PATTERN.search(visible_text(previous_item["text"])))
 
 
 def merge_or_append_paragraph(flow_items: list[dict], paragraph_text: str, page_number: int,

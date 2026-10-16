@@ -1,0 +1,42 @@
+[project]
+name = "textar-worker"
+version = "0.1.0"
+description = "Word-level text attribute (bold, italic, underline, strikeout) worker for pdf2fb2: docTR word boxes + TexTAR."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.13,<3",                          # cu130 wheels: RTX 50-series (sm_120)
+    "torchvision>=0.28,<1",                    # ResNet-18 feature extractor of TexTAR
+    "python-doctr>=1.0.1,<2",                  # DBNet word detector (the box source TexTAR was trained on)
+    "numpy>=2.1,<3",
+    "pillow>=11,<13",
+    "worker-protocol",
+]
+
+[dependency-groups]
+dev = ["pip-audit>=2.9,<3", "pytest>=8.4,<10"]
+
+[tool.uv]
+# Supply-chain safety: ignore package versions published in the last 7 days.
+exclude-newer = "7 days"
+# The PyTorch index publishes no upload dates; torch/torchvision are bounded by version ranges instead.
+exclude-newer-package = { torch = false, torchvision = false }
+# setuptools is pulled in by torch; versions below 83 have PYSEC-2026-3447.
+constraint-dependencies = ["setuptools>=83"]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+worker-protocol = { path = "../worker_protocol", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["unit_tests"]
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
