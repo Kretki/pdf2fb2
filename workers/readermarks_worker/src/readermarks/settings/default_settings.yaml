@@ -1,0 +1,36 @@
+# Default configuration of the reader-mark pipeline (see model_settings.py for ranges).
+# Relative paths are resolved against the repository root.
+path_settings:
+  backbone_directory: models/dinov2-small        # or models/dinov2-base
+  encoder_directory: models/timm/convnext_tiny.fb_in22k_ft_in1k
+  checkpoint_directory: models/readermarks
+  data_directory: readermarks_data
+  real_pages_directory: test_res/pages
+  layout_segments_file: test_res/segments.json   # picture boxes blanked in eval/tuning, as in pdf2fb2
+
+spotter_settings:
+  input_long_side: 1344
+  patch_size: 14
+  hidden_channels: 256
+  convolution_layers: 3
+  epoch_count: 40
+  batch_size: 16
+
+segmenter:
+  encoder_name: tu-convnext_tiny
+  crop_size: 768
+  step_count: 8000
+  batch_size: 6
+
+synthesis:
+  random_seed: 20261016
+  train_count: 2400
+  validation_count: 200
+  test_count: 200
+  unmarked_fraction: 0.25
+  rule_page_fraction: 0.30
+
+cleaning:
+  page_threshold: 0.5
+  patch_threshold: 0.5
+  pixel_threshold: 0.5

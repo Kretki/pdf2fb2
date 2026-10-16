@@ -24,12 +24,14 @@ dev = [
 ]
 
 [project.scripts]
-pdf2fb2 = "pdf2fb2.command_line:run_command_line"
+pdf2fb2 = "pdf2fb2.interface.command_line:run_command_line"
 
 [tool.uv]
 # Supply-chain safety: ignore package versions published in the last 7 days.
 exclude-newer = "7 days"
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]  # resolve only for your platform
+# semgrep pins mcp==1.29.0 (CVE-2026-59951); only its unused `semgrep mcp` subcommand imports it.
+override-dependencies = ["mcp>=1.30,<2"]
 
 [tool.uv.sources]
 worker-protocol = { path = "workers/worker_protocol", editable = true }
@@ -46,8 +48,12 @@ extend-exclude = ["models", "test_res", "pdf2fb2_output"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "N", "UP", "S"]
 
+[tool.ruff.lint.per-file-ignores]
+# S101: pytest tests assert by design (false positive for test code).
+"workers/*/unit_tests/*" = ["S101"]
+
 [tool.ruff.lint.isort]
-known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker"]
+known-first-party = ["pdf2fb2", "worker_protocol", "layout_worker", "ocr_worker", "readermarks"]
 
 [tool.bandit]
 exclude_dirs = [
@@ -55,5 +61,7 @@ exclude_dirs = [
     "workers/layout_worker/.venv",
     "workers/ocr_worker/.venv",
     "workers/worker_protocol/.venv",
+    "workers/readermarks_worker/.venv",
+    "workers/readermarks_worker/unit_tests",
     "models",
 ]

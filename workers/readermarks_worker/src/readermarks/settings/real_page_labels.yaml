@@ -1,0 +1,16 @@
+# Page-level ground truth for test_res/pages, given by the book owner.
+# Pages listed in marked_pages contain reader marks (handwriting, pen underlines, margin marks);
+# every other page in labeled_first..labeled_last has none. Pages outside that range are unlabeled.
+labeled_first: 1
+labeled_last: 101
+marked_pages: [16, 17, 20, 29, 31, 38, 52, 53,
+               57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69,
+               72, 73, 74, 75, 76, 77, 78, 79, 83, 84, 86, 87, 88, 91, 92, 93,
+               98, 99, 100, 101]
+# How the labeled pages are divided (counts; assignment is a seeded shuffle, saved once to splits.json).
+split_counts:
+  marked_validation: 10       # threshold tuning
+  marked_test: 30             # locked: final report only
+  unmarked_validation: 10     # threshold tuning + synthetic val/test bases
+  unmarked_test: 16           # locked: final report only
+  # remaining unmarked pages are the clean bases of the synthetic training set

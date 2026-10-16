@@ -12,6 +12,7 @@ MAX_EVENT_LINE_LENGTH = 4096
 MODEL_LOADING_EVENT = "model_loading"
 LAYOUT_PAGE_EVENT = "layout_page"
 OCR_PROGRESS_EVENT = "ocr_progress"
+MARKS_PAGE_EVENT = "marks_page"
 
 
 def emit_progress_event(event_name: str, **event_fields: int | str) -> None:

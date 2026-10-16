@@ -5,10 +5,15 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache
 
 # Virtual environments
 .venv
-models
+models/dinov2-small/*
+models/PP-DocLayoutV3/*
+models/Qianfan-OCR/*
+models/readermarks/*
+readermarks_data
 test_res
 test.sh
 *.pdf
@@ -16,3 +21,5 @@ test.sh
 pdf2fb2_output
 *.tmp
 .ruff_cache
+AGENTS.md
+STAGE_CLEAN.md

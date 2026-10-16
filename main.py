@@ -6,7 +6,7 @@ venvs under ``workers/`` (see README.md).
 
 import sys
 
-from pdf2fb2.command_line import run_command_line
+from pdf2fb2.interface.command_line import run_command_line
 
 if __name__ == "__main__":
     sys.exit(run_command_line())
