@@ -154,7 +154,7 @@ def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: Progr
         marks_stage = MarksStage(worker_launcher, MARKS_WORKER,
                                  parsed_arguments.marks_model_directory or READERMARKS_CHECKPOINT_DIRECTORY,
                                  parsed_arguments.device_name, parsed_arguments.debug_marks)
-        mark_rescanner = MarkRescanner(marks_stage, layout_stage, ocr_stage)
+        mark_rescanner = MarkRescanner(marks_stage, layout_stage)
     return ConversionPipeline(layout_stage, ocr_stage, progress_display, mark_rescanner)
 
 

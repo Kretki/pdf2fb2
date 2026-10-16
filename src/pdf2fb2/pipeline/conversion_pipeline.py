@@ -13,7 +13,6 @@ from pdf2fb2.progress.pipeline_progress import (
     DRAWING_STAGE,
     RECOGNITION_STAGE,
     RENDERING_STAGE,
-    RESCAN_RECOGNITION_STAGE,
     RESCAN_SEGMENTATION_STAGE,
     SEGMENTATION_STAGE,
     PipelineProgress,
@@ -67,14 +66,14 @@ def active_stage_names(draw_segments: bool, clean_marks: bool = False) -> list[s
 
     Args:
         draw_segments: Whether segmentation drawings are produced.
-        clean_marks: Whether reader marks are removed (cleaning + rescan of marked pages after OCR).
+        clean_marks: Whether reader marks are removed (cleaning + re-segmentation of marked pages before OCR).
 
     Returns:
         Stage names for ``PipelineProgress``.
     """
-    rescan_stages = [CLEANING_STAGE, RESCAN_SEGMENTATION_STAGE, RESCAN_RECOGNITION_STAGE] if clean_marks else []
+    rescan_stages = [CLEANING_STAGE, RESCAN_SEGMENTATION_STAGE] if clean_marks else []
     optional_stages = [DRAWING_STAGE] if draw_segments else []
-    return [RENDERING_STAGE, SEGMENTATION_STAGE, RECOGNITION_STAGE, *rescan_stages, *optional_stages,
+    return [RENDERING_STAGE, SEGMENTATION_STAGE, *rescan_stages, RECOGNITION_STAGE, *optional_stages,
             ASSEMBLING_STAGE]
 
 
@@ -85,11 +84,10 @@ def rescan_trackers(pipeline_progress: PipelineProgress) -> RescanProgress:
         pipeline_progress: Overall progress.
 
     Returns:
-        Trackers of the cleaning, re-segmentation and re-recognition stages.
+        Trackers of the cleaning and re-segmentation stages.
     """
     return RescanProgress(pipeline_progress.stage_tracker(CLEANING_STAGE),
-                          pipeline_progress.stage_tracker(RESCAN_SEGMENTATION_STAGE),
-                          pipeline_progress.stage_tracker(RESCAN_RECOGNITION_STAGE))
+                          pipeline_progress.stage_tracker(RESCAN_SEGMENTATION_STAGE))
 
 
 def draw_overlays(page_records: list[dict], output_directory: Path, stage_progress: StageProgress) -> Path:
@@ -163,7 +161,7 @@ def report_outcome(conversion_outcome: ConversionOutcome) -> int:
 
 
 class ConversionPipeline:
-    """Render -> segment -> OCR -> [clean marks + rescan] -> FB2 -> checks, with one overall progress display.
+    """Render -> segment -> [clean marks + re-segment] -> OCR -> FB2 -> checks, with one overall progress display.
 
     Usage:
         Build with injected stages and display (see ``command_line``) and call ``convert_document``.
@@ -177,7 +175,7 @@ class ConversionPipeline:
             page_segmenter: Layout stage.
             segment_recognizer: OCR stage.
             progress_display: Shows the overall progress and the current step.
-            mark_rescanner: Cleans pages with reader marks and rescans them after OCR, or None to skip.
+            mark_rescanner: Cleans pages with reader marks and re-segments them before OCR, or None to skip.
         """
         self._mark_rescanner = mark_rescanner
         self._page_segmenter = page_segmenter
@@ -221,11 +219,11 @@ class ConversionPipeline:
         """
         output_directory = conversion_request.output_directory
         page_records = self._segment_document(conversion_request, pipeline_progress)
-        self._segment_recognizer.recognize_segments(page_records, output_directory,
-                                                    pipeline_progress.stage_tracker(RECOGNITION_STAGE))
         if self._mark_rescanner is not None:
             page_records = self._mark_rescanner.rescan_marked_pages(page_records, output_directory,
                                                                     rescan_trackers(pipeline_progress))
+        self._segment_recognizer.recognize_segments(page_records, output_directory,
+                                                    pipeline_progress.stage_tracker(RECOGNITION_STAGE))
         detected_problems = check_segment_boxes(page_records)
         drawings_directory = None
         if conversion_request.draw_segments:

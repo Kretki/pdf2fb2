@@ -48,7 +48,7 @@ def merge_rescanned_page(first_record: dict, rescanned_record: dict) -> dict:
 
     Args:
         first_record: First-pass page record (original page).
-        rescanned_record: Record of the cleaned page (segmented and OCR'd again).
+        rescanned_record: Record of the cleaned page (segmented again, not yet OCR'd).
 
     Returns:
         New page record with the original page number and size, the cleaned image and the merged,

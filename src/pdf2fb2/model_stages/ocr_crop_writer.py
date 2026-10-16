@@ -91,7 +91,7 @@ class OcrCropWriter:
         segment_indexes = _ocr_segment_indexes(page_record)
         uncached_blocks = [(block_number, segment_index)
                            for block_number, segment_index in enumerate(segment_indexes, start=1)
-                           if build_segment_key(page_record["page"], page_record["segments"][segment_index])
+                           if build_segment_key(page_record, page_record["segments"][segment_index])
                            not in self._text_cache]
         if not uncached_blocks:
             return []
@@ -116,6 +116,6 @@ class OcrCropWriter:
         page_segment = page_record["segments"][segment_index]
         crop_path = self._crops_directory / f"page_{page_record['page']:04d}_segment_{segment_index:03d}.png"
         crop_segment_for_ocr(page_image, page_segment["bbox"]).save(crop_path)
-        return OcrCropItem(item_key=build_segment_key(page_record["page"], page_segment),
+        return OcrCropItem(item_key=build_segment_key(page_record, page_segment),
                            image_file=relative_to_directory(self._work_directory, crop_path),
                            max_new_tokens=ocr_token_limit(page_segment["label"]))

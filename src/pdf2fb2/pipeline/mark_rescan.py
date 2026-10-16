@@ -1,17 +1,17 @@
-"""Reader-mark rescan: clean marked pages, segment and OCR them again, merge with the first pass.
+"""Reader-mark rescan: clean marked pages, segment them again, merge with the first layout pass.
 
-Flow (after the first layout + OCR pass):
+Flow (after the first layout pass, before any OCR):
     1. the page cleaner detects reader marks with picture segments blanked out;
-    2. cleaned pages are copied to ``<output>/rescan/pages`` and segmented again;
-    3. the new segments are OCR'd again (own cache, crops and job files under ``rescan/``);
-    4. the rescan text is merged with the first-pass pictures; unmarked pages stay as they were.
+    2. cleaned pages are copied to ``<output>/rescan/pages`` and segmented again (job files under ``rescan/``);
+    3. the rescan text segments are merged with the first-pass pictures; unmarked pages stay as they were.
+The merged records are read by OCR once, afterwards, by the conversion pipeline.
 """
 
 import shutil
 from pathlib import Path
 
 from pdf2fb2.pipeline.page_merging import merge_page_records
-from pdf2fb2.pipeline.stage_contracts import PageCleaner, PageSegmenter, RescanProgress, SegmentRecognizer
+from pdf2fb2.pipeline.stage_contracts import PageCleaner, PageSegmenter, RescanProgress
 
 RESCAN_DIRECTORY = "rescan"
 RESCAN_PAGES_DIRECTORY = "pages"
@@ -53,36 +53,33 @@ def restore_page_numbers(rescanned_records: list[dict], page_numbers: list[int])
 
 
 class MarkRescanner:
-    """Runs cleaning, re-segmentation and re-recognition of pages with reader marks.
+    """Runs cleaning and re-segmentation of pages with reader marks (no OCR).
 
     Usage:
-        Built by the command line with the marks, layout and OCR stages; injected into the pipeline.
+        Built by the command line with the marks and layout stages; injected into the pipeline.
     """
 
-    def __init__(self, page_cleaner: PageCleaner, page_segmenter: PageSegmenter,
-                 segment_recognizer: SegmentRecognizer) -> None:
+    def __init__(self, page_cleaner: PageCleaner, page_segmenter: PageSegmenter) -> None:
         """Store the stages.
 
         Args:
             page_cleaner: Reader-mark detection/removal stage.
             page_segmenter: Layout stage (also used for the first pass).
-            segment_recognizer: OCR stage (also used for the first pass).
         """
         self._page_cleaner = page_cleaner
         self._page_segmenter = page_segmenter
-        self._segment_recognizer = segment_recognizer
 
     def rescan_marked_pages(self, page_records: list[dict], work_directory: Path,
                             rescan_progress: RescanProgress) -> list[dict]:
-        """Clean marked pages and replace their records by a rescan of the cleaned page.
+        """Clean marked pages and replace their records by a re-segmentation of the cleaned page.
 
         Args:
-            page_records: OCR'd first-pass page records.
+            page_records: Segmented (not yet OCR'd) first-pass page records.
             work_directory: Conversion output directory.
-            rescan_progress: Progress sinks of cleaning, re-segmentation and re-recognition.
+            rescan_progress: Progress sinks of cleaning and re-segmentation.
 
         Returns:
-            Final page records in page order.
+            Final segmented page records in page order, ready for OCR.
 
         Raises:
             WorkerFailedError: If a model worker fails.
@@ -91,13 +88,10 @@ class MarkRescanner:
                                                        rescan_progress.cleaning_progress)
         if not cleaned_pages:
             rescan_progress.segmentation_progress.advance_stage(1, 1, "no reader marks found")
-            rescan_progress.recognition_progress.advance_stage(1, 1, "no pages to read again")
             return page_records
         rescan_directory = work_directory / RESCAN_DIRECTORY
         staged_images = stage_cleaned_pages(cleaned_pages, rescan_directory)
         rescanned_list = self._page_segmenter.segment_pages(staged_images, rescan_directory,
                                                             rescan_progress.segmentation_progress)
         rescanned_records = restore_page_numbers(rescanned_list, sorted(cleaned_pages))
-        self._segment_recognizer.recognize_segments(list(rescanned_records.values()), rescan_directory,
-                                                    rescan_progress.recognition_progress)
         return merge_page_records(page_records, rescanned_records)

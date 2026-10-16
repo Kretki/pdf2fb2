@@ -56,7 +56,7 @@ def apply_cached_texts(page_records: list[dict], text_cache: OcrTextCache) -> No
     for page_record in page_records:
         for page_segment in page_record["segments"]:
             if requires_ocr(page_segment["label"]):
-                page_segment["text"] = text_cache.lookup_text(build_segment_key(page_record["page"], page_segment))
+                page_segment["text"] = text_cache.lookup_text(build_segment_key(page_record, page_segment))
 
 
 class OcrProgressRelay:

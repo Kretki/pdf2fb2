@@ -4,18 +4,25 @@ from pathlib import Path
 
 from worker_protocol.json_files import read_json_document, write_json_document
 
+CLEANED_PAGE_TAG = "c"
 
-def build_segment_key(page_number: int, page_segment: dict) -> str:
+
+def build_segment_key(page_record: dict, page_segment: dict) -> str:
     """Build the cache key of a segment.
 
+    Usage:
+        Pages cleaned of reader marks get their own key space, so a text read from the original
+        (marked) page in an earlier run is never reused for the cleaned page.
+
     Args:
-        page_number: 1-based page number.
+        page_record: Page record with the 1-based ``page`` and an optional ``rescanned`` flag.
         page_segment: Segment with ``bbox`` in pixels.
 
     Returns:
-        Key like ``"3:120,88,940,410"``.
+        Key like ``"3:120,88,940,410"`` (``"3c:..."`` for a cleaned page).
     """
-    return f"{page_number}:" + ",".join(str(int(coordinate)) for coordinate in page_segment["bbox"])
+    page_tag = f"{page_record['page']}{CLEANED_PAGE_TAG if page_record.get('rescanned') else ''}"
+    return f"{page_tag}:" + ",".join(str(int(coordinate)) for coordinate in page_segment["bbox"])
 
 
 class OcrTextCache:

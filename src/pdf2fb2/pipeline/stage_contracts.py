@@ -13,7 +13,7 @@ from pdf2fb2.progress.progress_contracts import StageProgress
 
 
 class PageCleaner(Protocol):
-    """Removes reader marks (handwriting, pen/pencil marks) from already segmented and OCR'd pages."""
+    """Removes reader marks (handwriting, pen/pencil marks) from segmented pages before OCR."""
 
     def clean_pages(self, page_records: list[dict], work_directory: Path,
                     stage_progress: StageProgress) -> dict[int, Path]:
@@ -68,32 +68,31 @@ class SegmentRecognizer(Protocol):
 
 @dataclass(frozen=True)
 class RescanProgress:
-    """Progress sinks of the three steps of the reader-mark rescan.
+    """Progress sinks of the two steps of the reader-mark rescan.
 
     Attributes:
         cleaning_progress: Reader-mark detection and cleaning.
         segmentation_progress: Layout of the cleaned pages.
-        recognition_progress: OCR of the cleaned pages.
     """
 
     cleaning_progress: StageProgress
     segmentation_progress: StageProgress
-    recognition_progress: StageProgress
 
 
 class MarkedPageRescanner(Protocol):
-    """Cleans pages with reader marks and replaces their records by a rescan of the cleaned page."""
+    """Cleans pages with reader marks and replaces their records by a re-segmentation of the cleaned page."""
 
     def rescan_marked_pages(self, page_records: list[dict], work_directory: Path,
                             rescan_progress: RescanProgress) -> list[dict]:
-        """Clean marked pages, segment and OCR them again, and merge them with the untouched pages.
+        """Clean marked pages, segment them again, and merge them with the untouched pages (no OCR).
 
         Args:
-            page_records: OCR'd page records of the first pass.
+            page_records: Segmented page records of the first pass (not yet OCR'd).
             work_directory: Conversion output directory.
-            rescan_progress: Progress sinks of the three steps.
+            rescan_progress: Progress sinks of the two steps.
 
         Returns:
-            Final page records in page order (rescanned pages replaced, pictures kept from the first pass).
+            Final segmented page records in page order (rescanned pages replaced, pictures kept from the
+            first pass), ready for OCR.
         """
         ...

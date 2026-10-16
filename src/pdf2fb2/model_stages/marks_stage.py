@@ -1,6 +1,6 @@
 """Reader-mark cleaning stage: delegates handwriting/pen-mark removal to the readermarks worker venv.
 
-Runs after layout and OCR. Picture segments found by the layout model are sent as masked regions,
+Runs after layout and before OCR. Picture segments found by the layout model are sent as masked regions,
 so the worker blanks them before detection (printed pictures are never taken for hand drawings).
 Only pages with reader marks are returned, as cleaned images for a rescan.
 """

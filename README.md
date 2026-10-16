@@ -43,13 +43,13 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
 ## Pipeline
 
 1. Render PDF pages (PyMuPDF).
-2. Segment every page with PP-DocLayoutV3 and read the text segments with Qianfan-OCR.
+2. Segment every page with PP-DocLayoutV3 (pictures are cut out as images, never OCR'd).
 3. Reader-mark detection (`workers/readermarks_worker`, checkpoints in `models/readermarks`): picture
    segments found by the layout model are blanked first (printed pictures are never taken for hand
    drawings), then handwritten notes, pen/pencil underlines and margin marks are detected and removed.
-4. Pages with marks are rescanned: the cleaned page is segmented and OCR'd again (`rescan/`).
-5. Final records = first-pass pictures + first-pass data of unmarked pages + rescanned data of
-   cleaned pages → FB2 assembly and checks.
+4. Pages with marks are re-segmented: the cleaned page goes through the layout model again (`rescan/`).
+5. Final records = first-pass pictures + first-pass segments of unmarked pages + re-segmented
+   cleaned pages; only then Qianfan-OCR reads every text segment, once → FB2 assembly and checks.
 
 `--keep-marks` skips steps 3–4, `--debug-marks` writes `marks/<page>/debug.png` overlays.
 
@@ -70,8 +70,8 @@ When output is redirected, a line is printed every 10% instead.
 
 Output directory: `pages/` (renders), `vis/` (segmentation drawings), `ocr_crops/`,
 `layout_job.json`/`layout_result.json`, `ocr_job.json`/`ocr_results.jsonl`, `ocr_cache.json`
-(re-runs skip already read segments), `marks/` + `marks_job.json`/`marks_result.json` (reader marks),
-`rescan/` (cleaned pages with their own layout/OCR files), `segments.json` (final records, rescanned
+(re-runs skip already read segments; cleaned pages have their own keys), `marks/` + `marks_job.json`/`marks_result.json` (reader marks),
+`rescan/` (cleaned pages with their own layout files), `segments.json` (final records, rescanned
 pages flagged `"rescanned": true`) and `<name>.fb2`. Worker output (model loading, warnings,
 tracebacks) goes to `layout_job.log` / `ocr_job.log` / `marks_job.log`.
 
