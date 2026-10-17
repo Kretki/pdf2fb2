@@ -30,7 +30,9 @@ from pdf2fb2.model_stages.ocr_stage import OcrBackendSettings, OcrStage
 from pdf2fb2.model_stages.proofread_stage import ProofreadStage
 from pdf2fb2.model_stages.style_stage import StyleStage
 from pdf2fb2.pipeline.conversion_pipeline import ConversionPipeline, ConversionRequest
+from pdf2fb2.pipeline.handwriting_check import HandwritingCheck
 from pdf2fb2.pipeline.mark_rescan import MarkRescanner
+from pdf2fb2.pipeline.picture_recovery import PictureRecovery
 from pdf2fb2.progress.progress_contracts import ProgressDisplay
 from pdf2fb2.progress.terminal_progress import create_progress_display
 from pdf2fb2.project_paths import (
@@ -42,6 +44,7 @@ from pdf2fb2.project_paths import (
     TEXTAR_MODEL_DIRECTORY,
 )
 from pdf2fb2.proofreading.flow_proofreader import LanguageModelProofreader
+from pdf2fb2.segments.glyph_measurement import OpenCvGlyphMeter
 from pdf2fb2.worker_runtime.worker_environment import (
     LAYOUT_WORKER,
     MARKS_WORKER,
@@ -65,6 +68,11 @@ def _add_model_arguments(argument_parser: argparse.ArgumentParser) -> None:
     argument_parser.add_argument("--device", dest="device_name", type=parse_device, default="gpu:0")
     argument_parser.add_argument("--threshold", dest="score_threshold", type=parse_probability, default=0.5,
                                  help="layout score threshold, 0..1")
+    argument_parser.add_argument("--picture-threshold", dest="picture_threshold", type=parse_probability,
+                                 default=0.05, help="layout score threshold of the picture proposals for "
+                                 "lettering that does not fit the book's font size, 0..1")
+    argument_parser.add_argument("--no-picture-recovery", dest="skip_picture_recovery", action="store_true",
+                                 help="keep lettering that does not fit the book's font size as text")
     argument_parser.add_argument("--layout-model-dir", dest="layout_model_directory", type=parse_existing_directory,
                                  default=LAYOUT_MODEL_DIRECTORY)
     argument_parser.add_argument("--qianfan-path", dest="qianfan_directory", type=parse_existing_directory,
@@ -84,7 +92,7 @@ def _add_marks_arguments(argument_parser: argparse.ArgumentParser) -> None:
         argument_parser: Parser to extend.
     """
     argument_parser.add_argument("--keep-marks", dest="keep_marks", action="store_true",
-                                 help="skip reader-mark removal and the rescan of marked pages")
+                                 help="skip the handwriting check, reader-mark removal and the rescan of marked pages")
     argument_parser.add_argument("--marks-model-dir", dest="marks_model_directory", type=parse_existing_directory,
                                  default=None, help="readermarks checkpoints (default models/readermarks)")
     argument_parser.add_argument("--debug-marks", dest="debug_marks", action="store_true",
@@ -162,6 +170,24 @@ def build_ocr_settings(parsed_arguments: argparse.Namespace) -> OcrBackendSettin
     )
 
 
+def build_picture_recovery(parsed_arguments: argparse.Namespace,
+                           worker_launcher: SubprocessWorkerLauncher) -> PictureRecovery | None:
+    """Wire the picture recovery with the OpenCV glyph meter and a low-threshold layout stage.
+
+    Args:
+        parsed_arguments: Parsed command line.
+        worker_launcher: Starts the layout worker.
+
+    Returns:
+        The picture recovery, or None with ``--no-picture-recovery``.
+    """
+    if parsed_arguments.skip_picture_recovery:
+        return None
+    proposal_stage = LayoutStage(worker_launcher, LAYOUT_WORKER, parsed_arguments.layout_model_directory,
+                                 parsed_arguments.device_name, parsed_arguments.picture_threshold)
+    return PictureRecovery(OpenCvGlyphMeter(), proposal_stage)
+
+
 def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: ProgressDisplay) -> ConversionPipeline:
     """Wire the stages with the subprocess launcher, the worker venvs and the progress display.
 
@@ -177,17 +203,20 @@ def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: Progr
                                parsed_arguments.device_name, parsed_arguments.score_threshold)
     ocr_stage = OcrStage(worker_launcher, OCR_WORKER, build_ocr_settings(parsed_arguments))
     mark_rescanner = None
+    handwriting_check = None
     if not parsed_arguments.keep_marks:
         marks_stage = MarksStage(worker_launcher, MARKS_WORKER,
                                  parsed_arguments.marks_model_directory or READERMARKS_CHECKPOINT_DIRECTORY,
                                  parsed_arguments.device_name, parsed_arguments.debug_marks)
         mark_rescanner = MarkRescanner(marks_stage, layout_stage)
+        handwriting_check = HandwritingCheck(marks_stage)
     style_stage = None if parsed_arguments.skip_styles else StyleStage(
         worker_launcher, STYLE_WORKER, parsed_arguments.textar_model_directory,
         parsed_arguments.doctr_model_directory, parsed_arguments.device_name)
     flow_checker = None if parsed_arguments.skip_proofread else LanguageModelProofreader(ProofreadStage(
         worker_launcher, PROOFREAD_WORKER, parsed_arguments.proofread_model_directory, parsed_arguments.device_name))
-    return ConversionPipeline(layout_stage, ocr_stage, progress_display, mark_rescanner, style_stage, flow_checker)
+    return ConversionPipeline(layout_stage, ocr_stage, progress_display, mark_rescanner, style_stage, flow_checker,
+                              handwriting_check, build_picture_recovery(parsed_arguments, worker_launcher))
 
 
 def build_request(parsed_arguments: argparse.Namespace, pdf_path: Path) -> ConversionRequest:

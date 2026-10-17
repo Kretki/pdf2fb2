@@ -11,6 +11,7 @@ from typing import Protocol
 
 from pdf2fb2.fb2_output.flow_model import BookFlow
 from pdf2fb2.progress.progress_contracts import StageProgress
+from pdf2fb2.segments.font_statistics import PageGlyphs
 
 
 class PageCleaner(Protocol):
@@ -31,6 +32,57 @@ class PageCleaner(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class IsolatedRegion:
+    """A page region checked for reader marks on its own, with the rest of the page blanked.
+
+    Attributes:
+        page_image: Rendered page image inside the work directory.
+        page_size: (width, height) of the page image in pixels.
+        region_box: [x1, y1, x2, y2] of the region in page pixels.
+    """
+
+    page_image: Path
+    page_size: tuple[int, int]
+    region_box: list[float]
+
+
+class RegionMarkInspector(Protocol):
+    """Tells which page regions contain reader marks (handwriting, pen/pencil marks)."""
+
+    def find_marked_regions(self, isolated_regions: list[IsolatedRegion], work_directory: Path,
+                            stage_progress: StageProgress) -> set[int]:
+        """Run reader-mark detection on every region with the rest of its page blanked.
+
+        Args:
+            isolated_regions: Regions to inspect (at least one).
+            work_directory: Directory used for staged images, job, result and per-region mark files.
+            stage_progress: Receives per-region progress.
+
+        Returns:
+            Indexes into ``isolated_regions`` of the regions with reader marks.
+        """
+        ...
+
+
+class HandwritingDetector(Protocol):
+    """Marks segments that are human-written notes instead of book text."""
+
+    def mark_handwritten_segments(self, page_records: list[dict], work_directory: Path,
+                                  stage_progress: StageProgress) -> int:
+        """Find handwritten segments in the segmented pages and relabel them.
+
+        Args:
+            page_records: Segmented page records of the first layout pass (mutated: labels rewritten).
+            work_directory: Conversion output directory.
+            stage_progress: Receives the check's progress.
+
+        Returns:
+            Number of segments marked as handwritten.
+        """
+        ...
+
+
 class PageSegmenter(Protocol):
     """Turns rendered page images into page records with ordered segments."""
 
@@ -45,6 +97,57 @@ class PageSegmenter(Protocol):
 
         Returns:
             One page record per image, in page order.
+        """
+        ...
+
+
+class BoxProposer(Protocol):
+    """Proposes every layout box of a page above a (low) score threshold, overlapping ones included."""
+
+    def propose_boxes(self, page_images: list[Path], work_directory: Path,
+                      stage_progress: StageProgress) -> list[list[dict]]:
+        """Detect the layout boxes of the pages.
+
+        Args:
+            page_images: Page images inside ``work_directory``, in page order.
+            work_directory: Output directory used for job and result files.
+            stage_progress: Receives per-page progress.
+
+        Returns:
+            Per page, boxes ``{"label", "bbox", "score", "order"}``.
+        """
+        ...
+
+
+class GlyphMeter(Protocol):
+    """Measures the lettering of a segmented page."""
+
+    def measure_page(self, page_record: dict) -> PageGlyphs:
+        """Measure the glyph heights of the segments and find letter-like ink outside them.
+
+        Args:
+            page_record: Page record with ``image`` and ``segments``.
+
+        Returns:
+            Measurements aligned with the page's segments.
+        """
+        ...
+
+
+class PictureRecoverer(Protocol):
+    """Turns text segments that are really lettering of a picture into that picture."""
+
+    def recover_pictures(self, page_records: list[dict], work_directory: Path,
+                         stage_progress: StageProgress) -> int:
+        """Find lettering that does not fit the book's font size and replace it by the picture it belongs to.
+
+        Args:
+            page_records: Final segmented page records, not yet OCR'd (mutated).
+            work_directory: Conversion output directory.
+            stage_progress: Receives the step's progress.
+
+        Returns:
+            Number of recovered pictures.
         """
         ...
 

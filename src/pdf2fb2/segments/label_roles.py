@@ -3,14 +3,17 @@
 Unknown labels are treated as body text.
 """
 
-SKIPPED_LABELS = frozenset({"header", "footer", "header_image", "footer_image"})  # running heads, dropped
+HANDWRITTEN_LABEL = "handwritten"  # set by the handwriting check: a reader's note, not book text
+SKIPPED_LABELS = frozenset({"header", "footer", "header_image", "footer_image", HANDWRITTEN_LABEL})  # dropped
 PAGE_NUMBER_LABELS = frozenset({"number"})  # printed page number
 DROPPED_LABELS = frozenset({"inline_formula", "formula_number"})  # covered by parent text/formula
-PICTURE_LABELS = frozenset({"image", "chart", "seal", "display_formula"})  # embedded as pictures
+IMAGE_LABEL = "image"
+PICTURE_LABELS = frozenset({IMAGE_LABEL, "chart", "seal", "display_formula"})  # embedded as pictures
 CAPTION_LABELS = frozenset({"figure_title", "table_title", "chart_title"})
 FOOTNOTE_LABELS = frozenset({"footnote", "vision_footnote"})
 DOCUMENT_TITLE_LABEL = "doc_title"
 HEADING_LABELS = frozenset({"paragraph_title"})
+BODY_TEXT_LABEL = "text"  # plain paragraphs: the reference for the usual font size
 TABLE_LABEL = "table"
 ABSTRACT_LABEL = "abstract"
 
@@ -21,6 +24,7 @@ LABEL_COLORS = {
     "chart_title": (218, 165, 32), "display_formula": (0, 128, 128), "header": (128, 128, 0),
     "footer": (128, 128, 0), "number": (112, 128, 144), "footnote": (160, 82, 45),
     "seal": (178, 34, 34), "reference": (72, 61, 139), "aside_text": (100, 149, 237),
+    HANDWRITTEN_LABEL: (255, 0, 255),
 }
 DEFAULT_LABEL_COLOR = (128, 128, 128)
 

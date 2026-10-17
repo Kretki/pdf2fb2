@@ -4,6 +4,8 @@ from pdf2fb2.progress.progress_contracts import ProgressDisplay
 
 RENDERING_STAGE = "rendering"
 CLEANING_STAGE = "cleaning"
+HANDWRITING_STAGE = "handwriting"
+PICTURE_STAGE = "pictures"
 SEGMENTATION_STAGE = "segmentation"
 DRAWING_STAGE = "drawing"
 RECOGNITION_STAGE = "recognition"
@@ -14,8 +16,8 @@ ASSEMBLING_STAGE = "assembling"
 
 # Rough share of the run time of each stage; OCR dominates on real books.
 STAGE_WEIGHTS = {RENDERING_STAGE: 6.0, SEGMENTATION_STAGE: 22.0, RECOGNITION_STAGE: 65.0, CLEANING_STAGE: 6.0,
-                 RESCAN_SEGMENTATION_STAGE: 4.0, STYLING_STAGE: 4.0, PROOFREADING_STAGE: 15.0, DRAWING_STAGE: 3.0,
-                 ASSEMBLING_STAGE: 4.0}
+                 RESCAN_SEGMENTATION_STAGE: 4.0, HANDWRITING_STAGE: 2.0, PICTURE_STAGE: 2.0, STYLING_STAGE: 4.0,
+                 PROOFREADING_STAGE: 15.0, DRAWING_STAGE: 3.0, ASSEMBLING_STAGE: 4.0}
 
 
 class PipelineProgress:

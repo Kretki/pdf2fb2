@@ -36,6 +36,48 @@ def box_intersection(first_box: list[float], second_box: list[float]) -> float:
                      min(first_box[2], second_box[2]), min(first_box[3], second_box[3])])
 
 
+def union_box(bounding_boxes: list[list[float]]) -> list[float]:
+    """Return the smallest box containing all given boxes.
+
+    Args:
+        bounding_boxes: [x1, y1, x2, y2] boxes in pixels (at least one).
+
+    Returns:
+        [x1, y1, x2, y2] of the enclosing box.
+
+    Raises:
+        ValueError: If ``bounding_boxes`` is empty.
+    """
+    return [float(min(bounding_box[0] for bounding_box in bounding_boxes)),
+            float(min(bounding_box[1] for bounding_box in bounding_boxes)),
+            float(max(bounding_box[2] for bounding_box in bounding_boxes)),
+            float(max(bounding_box[3] for bounding_box in bounding_boxes))]
+
+
+def surrounding_boxes(bounding_box: list[float], page_size: tuple[int, int]) -> tuple[list[float], ...]:
+    """Boxes covering the whole page except one box.
+
+    Usage:
+        Call to blank everything but one region of a page (e.g. before checking that region alone).
+
+    Args:
+        bounding_box: [x1, y1, x2, y2] in pixels of the region to keep.
+        page_size: (width, height) of the page in pixels.
+
+    Returns:
+        Up to four non-empty boxes (above, below, left of and right of the region), clamped to the page.
+    """
+    page_width, page_height = page_size
+    left_edge = min(max(0.0, bounding_box[0]), page_width)
+    top_edge = min(max(0.0, bounding_box[1]), page_height)
+    right_edge = min(max(left_edge, bounding_box[2]), page_width)
+    bottom_edge = min(max(top_edge, bounding_box[3]), page_height)
+    candidate_boxes = ([0.0, 0.0, page_width, top_edge], [0.0, bottom_edge, page_width, page_height],
+                       [0.0, top_edge, left_edge, bottom_edge], [right_edge, top_edge, page_width, bottom_edge])
+    return tuple([float(coordinate) for coordinate in candidate_box] for candidate_box in candidate_boxes
+                 if box_area(candidate_box) > 0)
+
+
 def _is_nested(candidate: dict, kept_segments: list[dict]) -> bool:
     """Tell whether a segment lies mostly inside an already kept one.
 

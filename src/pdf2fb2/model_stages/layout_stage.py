@@ -152,6 +152,47 @@ class LayoutStage:
         Raises:
             WorkerFailedError: If the worker fails or returns a mismatching result.
         """
+        paired_results = zip(page_images, self._run_layout(page_images, work_directory, stage_progress), strict=True)
+        return [build_page_record(page_number, image_path, raw_boxes)
+                for page_number, (image_path, raw_boxes) in enumerate(paired_results, start=1)]
+
+    def propose_boxes(self, page_images: list[Path], work_directory: Path,
+                      stage_progress: StageProgress) -> list[list[dict]]:
+        """Detect every layout box above the stage's threshold, without removing nested or overlapping boxes.
+
+        Usage:
+            Used with a low threshold to get the box candidates the first pass discarded (e.g. a picture the
+            model was unsure about).
+
+        Args:
+            page_images: Page images inside ``work_directory``, in page order.
+            work_directory: Output directory for ``layout_job.json`` / ``layout_result.json``.
+            stage_progress: Receives ``segmenting page k/n`` updates.
+
+        Returns:
+            Per page, the validated boxes ``{"label", "bbox", "score", "order"}`` in detection order.
+
+        Raises:
+            WorkerFailedError: If the worker fails or returns a mismatching result.
+        """
+        return [[parsed_box for parsed_box in map(_parse_box, raw_boxes) if parsed_box is not None]
+                for raw_boxes in self._run_layout(page_images, work_directory, stage_progress)]
+
+    def _run_layout(self, page_images: list[Path], work_directory: Path,
+                    stage_progress: StageProgress) -> list[list]:
+        """Run the layout worker and read its per-page raw boxes.
+
+        Args:
+            page_images: Page images inside ``work_directory``, in page order.
+            work_directory: Output directory for the job and result files.
+            stage_progress: Receives ``segmenting page k/n`` updates.
+
+        Returns:
+            Per page, the raw (unvalidated) boxes of the worker result.
+
+        Raises:
+            WorkerFailedError: If the worker fails or returns a mismatching result.
+        """
         layout_job = self._build_job(page_images, work_directory)
         job_file = work_directory / LAYOUT_JOB_FILE
         write_json_document(job_file, layout_job.to_payload())
@@ -164,9 +205,7 @@ class LayoutStage:
         if not isinstance(page_results, list) or len(page_results) != len(page_images) \
                 or not all(isinstance(page_result, dict) for page_result in page_results):
             raise WorkerFailedError("Layout worker returned a result that does not match the page list.")
-        paired_results = zip(page_images, page_results, strict=True)
-        return [build_page_record(page_number, image_path, page_result.get("boxes") or [])
-                for page_number, (image_path, page_result) in enumerate(paired_results, start=1)]
+        return [page_result.get("boxes") or [] for page_result in page_results]
 
     def _build_job(self, page_images: list[Path], work_directory: Path) -> LayoutJob:
         """Create the layout job for the given pages.

@@ -8,8 +8,10 @@ from pdf2fb2.pipeline.book_assembly import AssemblyProgress, AssemblyRequest, Bo
 from pdf2fb2.pipeline.quality_checks import check_segment_boxes
 from pdf2fb2.pipeline.stage_contracts import (
     FlowChecker,
+    HandwritingDetector,
     MarkedPageRescanner,
     PageSegmenter,
+    PictureRecoverer,
     RescanProgress,
     SegmentRecognizer,
     TextStyleDetector,
@@ -18,6 +20,8 @@ from pdf2fb2.progress.pipeline_progress import (
     ASSEMBLING_STAGE,
     CLEANING_STAGE,
     DRAWING_STAGE,
+    HANDWRITING_STAGE,
+    PICTURE_STAGE,
     PROOFREADING_STAGE,
     RECOGNITION_STAGE,
     RENDERING_STAGE,
@@ -70,7 +74,8 @@ class ConversionOutcome:
 
 
 def active_stage_names(draw_segments: bool, clean_marks: bool = False, detect_styles: bool = False,
-                       proofread_text: bool = False) -> list[str]:
+                       proofread_text: bool = False, check_handwriting: bool = False,
+                       recover_pictures: bool = False) -> list[str]:
     """List the progress stages of a conversion in execution order.
 
     Args:
@@ -78,16 +83,21 @@ def active_stage_names(draw_segments: bool, clean_marks: bool = False, detect_st
         clean_marks: Whether reader marks are removed (cleaning + re-segmentation of marked pages before OCR).
         detect_styles: Whether word styles (bold/italic/strikeout) are detected after OCR.
         proofread_text: Whether the book text is proofread with the language model before rendering.
+        check_handwriting: Whether position-outlier segments are checked for handwriting before cleaning.
+        recover_pictures: Whether off-size lettering is replaced by pictures before OCR.
 
     Returns:
         Stage names for ``PipelineProgress``.
     """
+    handwriting_stages = [HANDWRITING_STAGE] if check_handwriting else []
     rescan_stages = [CLEANING_STAGE, RESCAN_SEGMENTATION_STAGE] if clean_marks else []
+    picture_stages = [PICTURE_STAGE] if recover_pictures else []
     styling_stages = [STYLING_STAGE] if detect_styles else []
     optional_stages = [DRAWING_STAGE] if draw_segments else []
     proofreading_stages = [PROOFREADING_STAGE] if proofread_text else []
-    return [RENDERING_STAGE, SEGMENTATION_STAGE, *rescan_stages, RECOGNITION_STAGE, *styling_stages,
-            *optional_stages, *proofreading_stages, ASSEMBLING_STAGE]
+    return [RENDERING_STAGE, SEGMENTATION_STAGE, *handwriting_stages, *rescan_stages, *picture_stages,
+            RECOGNITION_STAGE,
+            *styling_stages, *optional_stages, *proofreading_stages, ASSEMBLING_STAGE]
 
 
 def rescan_trackers(pipeline_progress: PipelineProgress) -> RescanProgress:
@@ -147,7 +157,8 @@ def report_outcome(conversion_outcome: ConversionOutcome) -> int:
 
 
 class ConversionPipeline:
-    """Render -> segment -> [clean marks + re-segment] -> OCR -> [styles] -> [proofreading] -> FB2.
+    """Render -> segment -> [handwriting check] -> [clean marks + re-segment] -> [picture recovery] -> OCR -> [styles]
+    -> [proofreading] -> FB2.
 
     Usage:
         Build with injected stages and display (see ``command_line``) and call ``convert_document``.
@@ -155,7 +166,9 @@ class ConversionPipeline:
 
     def __init__(self, page_segmenter: PageSegmenter, segment_recognizer: SegmentRecognizer,
                  progress_display: ProgressDisplay, mark_rescanner: MarkedPageRescanner | None = None,
-                 style_detector: TextStyleDetector | None = None, flow_checker: FlowChecker | None = None) -> None:
+                 style_detector: TextStyleDetector | None = None, flow_checker: FlowChecker | None = None,
+                 handwriting_detector: HandwritingDetector | None = None,
+                 picture_recoverer: PictureRecoverer | None = None) -> None:
         """Store the stages.
 
         Args:
@@ -165,7 +178,13 @@ class ConversionPipeline:
             mark_rescanner: Cleans pages with reader marks and re-segments them before OCR, or None to skip.
             style_detector: Detects word bold/italic/strikeout in text segments, or None to skip.
             flow_checker: Proofreads and rearranges the book flow with a language model, or None to skip.
+            handwriting_detector: Marks position-outlier segments with handwriting before mark cleaning,
+                or None to skip.
+            picture_recoverer: Replaces lettering that does not fit the book's font size by pictures before OCR,
+                or None to skip.
         """
+        self._handwriting_detector = handwriting_detector
+        self._picture_recoverer = picture_recoverer
         self._book_assembler = BookAssembler(flow_checker)
         self._proofread_text = flow_checker is not None
         self._mark_rescanner = mark_rescanner
@@ -191,7 +210,9 @@ class ConversionPipeline:
                                              active_stage_names(conversion_request.draw_segments,
                                                                 self._mark_rescanner is not None,
                                                                 self._style_detector is not None,
-                                                                self._proofread_text))
+                                                                self._proofread_text,
+                                                                self._handwriting_detector is not None,
+                                                                self._picture_recoverer is not None))
         conversion_finished = False
         try:
             conversion_outcome = self._run_stages(conversion_request, pipeline_progress)
@@ -228,7 +249,7 @@ class ConversionPipeline:
 
     def _read_document(self, conversion_request: ConversionRequest,
                        pipeline_progress: PipelineProgress) -> list[dict]:
-        """Segment, clean + re-segment marked pages, OCR the final records and apply word styles.
+        """Segment, mark handwritten segments, clean + re-segment marked pages, recover pictures, OCR, apply styles.
 
         Args:
             conversion_request: What to convert and where.
@@ -239,9 +260,15 @@ class ConversionPipeline:
         """
         output_directory = conversion_request.output_directory
         page_records = self._segment_document(conversion_request, pipeline_progress)
+        if self._handwriting_detector is not None:
+            self._handwriting_detector.mark_handwritten_segments(page_records, output_directory,
+                                                                 pipeline_progress.stage_tracker(HANDWRITING_STAGE))
         if self._mark_rescanner is not None:
             page_records = self._mark_rescanner.rescan_marked_pages(page_records, output_directory,
                                                                     rescan_trackers(pipeline_progress))
+        if self._picture_recoverer is not None:
+            self._picture_recoverer.recover_pictures(page_records, output_directory,
+                                                     pipeline_progress.stage_tracker(PICTURE_STAGE))
         self._segment_recognizer.recognize_segments(page_records, output_directory,
                                                     pipeline_progress.stage_tracker(RECOGNITION_STAGE))
         if self._style_detector is not None:

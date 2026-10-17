@@ -56,12 +56,28 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
 
 1. Render PDF pages (PyMuPDF).
 2. Segment every page with PP-DocLayoutV3 (pictures are cut out as images, never OCR'd).
+   Handwriting check: every printed page keeps its content inside one vertical frame (per page parity,
+   from the content tops to the content bottoms of the pages, the 5% most extreme pages ignored), so text
+   segments sticking out of it by more than 2% of the page height (e.g. a note written above the running
+   head) are relabelled `handwritten` at once. Body text shares its column edges and headings sit at one horizontal position,
+   so text segments whose left/right edge (headings: center) lies outside the 2-sigma interval of
+   their group (same role, same page parity, at least 5 segments) are inspected by the reader-mark
+   model alone, with the rest of the page blanked (`outliers/`). Outliers with marks are relabelled
+   `handwritten` (`original_label` keeps the layout label) and are neither OCR'd nor put in the book.
 3. Reader-mark detection (`workers/readermarks_worker`, checkpoints in `models/readermarks`): picture
    segments found by the layout model are blanked first (printed pictures are never taken for hand
    drawings), then handwritten notes, pen/pencil underlines and margin marks are detected and removed.
 4. Pages with marks are re-segmented: the cleaned page goes through the layout model again (`rescan/`).
 5. Final records = first-pass pictures + first-pass segments of unmarked pages + re-segmented
-   cleaned pages; only then Qianfan-OCR reads every text segment, once.
+   cleaned pages. Picture recovery: OpenCV measures the median glyph height of every segment
+   (`glyph_height` in `segments.json`); the median over the plain paragraphs is the usual font size
+   (normal range: their 5th..95th percentile). Pages with body text outside 0.5x..2x of it, or with 8+
+   letter-like components of 2.5x+ that height outside every segment and inside the printed frame, are
+   segmented again with a low layout threshold (`picture_rescan/`, `--picture-threshold`, default 0.05).
+   The most probable picture proposal covering the region (and more probable than the text it would
+   replace) becomes an `image` segment that also takes in the text it covers and adjacent text whose
+   glyphs are outside the normal range (`recovered_from` keeps their labels). Statistics and outcomes:
+   `picture_rescan/font_statistics.json`. Only then Qianfan-OCR reads every text segment, once.
 6. Text styles (`workers/textar_worker`): docTR's DBNet finds the word boxes of every final page
    (the detector TexTAR was trained with), TexTAR classifies each word in context windows of 125
    neighbouring words (normal / bold / italic / bold+italic and none / underline / strikeout), and
@@ -90,9 +106,10 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
    * A paragraph break is removed when the joined text is more probable by 2 nats or more.
 10. FB2 rendering and checks.
 
-`--keep-marks` skips steps 3–4, `--debug-marks` writes `marks/<page>/debug.png` overlays,
+`--keep-marks` skips the handwriting check and steps 3–4, `--debug-marks` writes `marks/<page>/debug.png` overlays,
 `--no-styles` skips steps 6–7 (`--textar-model-dir`, `--doctr-model-dir` change the weight folders),
-`--no-proofread` skips step 9 (`--proofread-model-dir` changes the language model folder).
+`--no-proofread` skips step 9 (`--proofread-model-dir` changes the language model folder),
+`--no-picture-recovery` skips the picture recovery of step 5.
 
 ## Usage
 
