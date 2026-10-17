@@ -6,6 +6,9 @@ Usage:
 
 import argparse
 
+from pdf2fb2.document_sources.djvu_source import DjvuToPdfConverter
+from pdf2fb2.document_sources.pdf_source import PdfPassThrough
+from pdf2fb2.document_sources.source_formats import SourceFormatRegistry
 from pdf2fb2.model_stages.layout_stage import LayoutStage
 from pdf2fb2.model_stages.marks_stage import MarksStage
 from pdf2fb2.model_stages.ocr_stage import OcrBackendSettings, OcrStage
@@ -13,7 +16,7 @@ from pdf2fb2.model_stages.proofread_stage import ProofreadStage
 from pdf2fb2.model_stages.style_stage import StyleStage
 from pdf2fb2.pipeline.conversion_pipeline import ConversionPipeline, OptionalStages
 from pdf2fb2.pipeline.handwriting_check import HandwritingCheck
-from pdf2fb2.pipeline.layout_review import LayoutReview
+from pdf2fb2.pipeline.layout_review import SEGMENT_REVIEW_RULES, LayoutReview
 from pdf2fb2.pipeline.mark_rescan import MarkRescanner
 from pdf2fb2.pipeline.picture_recovery import PictureRecovery
 from pdf2fb2.pipeline.residual_rescan import ResidualTextRescan
@@ -30,6 +33,16 @@ from pdf2fb2.worker_runtime.worker_environment import (
 )
 from pdf2fb2.worker_runtime.worker_launcher import SubprocessWorkerLauncher
 from worker_protocol.ocr_job_schema import HTTP_BACKEND, TRANSFORMERS_BACKEND
+
+
+def build_source_registry() -> SourceFormatRegistry:
+    """Wire the supported input formats.
+
+    Returns:
+        Registry for ``.pdf`` (used as is) and ``.djvu``/``.djv`` (converted with ``ddjvu``).
+    """
+    djvu_converter = DjvuToPdfConverter()
+    return SourceFormatRegistry({".pdf": PdfPassThrough(), ".djvu": djvu_converter, ".djv": djvu_converter})
 
 
 def build_ocr_settings(parsed_arguments: argparse.Namespace) -> OcrBackendSettings:
@@ -119,5 +132,6 @@ def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: Progr
         handwriting_detector=handwriting_check, mark_rescanner=mark_rescanner,
         picture_recoverer=build_picture_recovery(parsed_arguments, worker_launcher),
         residual_finder=build_residual_rescan(parsed_arguments, worker_launcher),
+        segment_reviewer=None if parsed_arguments.skip_layout_review else LayoutReview(SEGMENT_REVIEW_RULES),
         layout_reviewer=None if parsed_arguments.skip_layout_review else LayoutReview(),
-        style_detector=style_stage, flow_checker=flow_checker))
+        style_detector=style_stage, flow_checker=flow_checker), build_source_registry())

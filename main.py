@@ -1,4 +1,4 @@
-"""Convenience launcher: ``uv run main.py book.pdf -o out`` (same as ``uv run pdf2fb2``).
+"""Convenience launcher: ``uv run main.py book.pdf`` (same as ``uv run pdf2fb2``).
 
 All logic lives in the ``pdf2fb2`` package; the model workers run in their own
 venvs under ``workers/`` (see README.md).

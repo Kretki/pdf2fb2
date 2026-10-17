@@ -1,9 +1,10 @@
-"""Runs a proofreading job: score the whole text, pick suspicious words, run all deletion tests."""
+"""Runs a proofreading job: score the whole text, pick suspicious words, run all deletion and rewrite tests."""
 
 from collections.abc import Callable
 
 from proofread_worker.deletion_checks import CheckRequest, block_check, break_check, word_check
 from proofread_worker.document_text import DocumentText, build_document_text
+from proofread_worker.rewrite_variants import rewrite_request
 from proofread_worker.token_scorer import TokenScorer
 from proofread_worker.word_statistics import block_word_entries, tokens_by_word
 from worker_protocol.proofread_job_schema import ProofreadJob, ProofreadSettings
@@ -31,7 +32,7 @@ def candidate_spans(word_tokens: list[list], proofread_settings: ProofreadSettin
 
 def build_check_requests(document_text: DocumentText, proofread_job: ProofreadJob,
                          word_span_indexes: list[int]) -> list[CheckRequest]:
-    """All deletion tests of the job.
+    """All deletion and rewrite tests of the job.
 
     Args:
         document_text: Joined document.
@@ -48,6 +49,8 @@ def build_check_requests(document_text: DocumentText, proofread_job: ProofreadJo
                        for block_index in proofread_job.block_checks]
     check_requests += [break_check(document_text, block_index, *test_limits)
                        for block_index in proofread_job.break_checks]
+    check_requests += [rewrite_request(document_text, rewrite_check, *test_limits)
+                       for rewrite_check in proofread_job.rewrite_checks]
     return [check_request for check_request in check_requests if check_request is not None]
 
 
@@ -61,13 +64,14 @@ def run_check_requests(token_scorer: TokenScorer, check_requests: list[CheckRequ
         progress_callback: Receives ``("checking", done, total)``.
 
     Returns:
-        ``{"word_checks": [...], "block_checks": [...], "break_checks": [...]}``.
+        ``{"word_checks": [...], "block_checks": [...], "break_checks": [...], "rewrite_checks": [...]}``.
     """
     flat_variants = [scored_variant for check_request in check_requests
                      for scored_variant in check_request.scored_variants]
     variant_scores = token_scorer.continuation_logprobs(
         flat_variants, lambda done_count, total_count: progress_callback("checking", done_count, total_count))
-    grouped_results: dict[str, list[dict]] = {"word_checks": [], "block_checks": [], "break_checks": []}
+    grouped_results: dict[str, list[dict]] = {"word_checks": [], "block_checks": [], "break_checks": [],
+                                              "rewrite_checks": []}
     read_offset = 0
     for check_request in check_requests:
         request_scores = variant_scores[read_offset:read_offset + len(check_request.scored_variants)]
@@ -81,7 +85,7 @@ def run_check_requests(token_scorer: TokenScorer, check_requests: list[CheckRequ
 
 def run_proofread_job(proofread_job: ProofreadJob, token_scorer: TokenScorer,
                       progress_callback: ProgressCallback) -> dict:
-    """Score the book text and run the deletion tests.
+    """Score the book text and run the deletion and rewrite tests.
 
     Args:
         proofread_job: Validated job.

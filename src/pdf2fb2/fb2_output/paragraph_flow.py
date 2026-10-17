@@ -4,6 +4,7 @@ import re
 
 from pdf2fb2.fb2_output.text_markup import SENTENCE_END_PATTERN, join_text_fragments, visible_text
 from pdf2fb2.segments.label_roles import PAGE_NUMBER_LABELS
+from pdf2fb2.text_languages.script_detection import is_spaceless_character
 
 DIGITS_PATTERN = re.compile(r"\d+")
 
@@ -25,6 +26,22 @@ def find_printed_page_number(page_record: dict) -> str | None:
     return printed_number
 
 
+def _starts_continuation(previous_text: str, paragraph_text: str) -> bool:
+    """Tell whether a paragraph's first character continues the previous text mid-sentence.
+
+    Args:
+        previous_text: Visible text of the previous paragraph.
+        paragraph_text: Visible text of the new paragraph.
+
+    Returns:
+        True when the new text starts in lowercase, or both texts meet in a script without letter case and
+        spaces (Chinese, Japanese).
+    """
+    first_character = paragraph_text[:1]
+    return first_character.islower() or (is_spaceless_character(first_character)
+                                         and is_spaceless_character(previous_text.rstrip()[-1:]))
+
+
 def _continues_previous(previous_item: dict | None, paragraph_text: str, paragraph_style: str,
                         is_list_item: bool) -> bool:
     """Tell whether a paragraph continues the previous one across a page/column break.
@@ -37,10 +54,11 @@ def _continues_previous(previous_item: dict | None, paragraph_text: str, paragra
 
     Returns:
         True if the previous paragraph has the same style, is not a list item, does not
-        end a sentence and the new one starts in lowercase.
+        end a sentence and the new one continues it (see ``_starts_continuation``).
     """
     return (previous_item is not None and previous_item["kind"] == "p" and previous_item["style"] == paragraph_style
-            and not previous_item["list"] and not is_list_item and visible_text(paragraph_text)[:1].islower()
+            and not previous_item["list"] and not is_list_item
+            and _starts_continuation(visible_text(previous_item["text"]), visible_text(paragraph_text))
             and not SENTENCE_END_PATTERN.search(visible_text(previous_item["text"])))
 
 

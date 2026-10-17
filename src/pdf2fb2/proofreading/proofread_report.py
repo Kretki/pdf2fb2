@@ -44,11 +44,12 @@ def write_proofread_report(report_path: Path, flow_blocks: list[FlowBlock], work
         flow_edits: Decided edits.
 
     Returns:
-        Summary counts (deleted words, deleted headings, deleted paragraphs, merged paragraphs).
+        Summary counts (deleted words, deleted headings, deleted paragraphs, merged paragraphs, fixed hyphens).
     """
     deleted_kinds = [flow_blocks[block_index].block_kind for block_index in flow_edits.deleted_blocks]
     edit_summary = {"deleted_words": len(flow_edits.deleted_words), "deleted_headings": deleted_kinds.count("heading"),
-                    "deleted_paragraphs": deleted_kinds.count("p"), "merged_paragraphs": len(flow_edits.merged_blocks)}
+                    "deleted_paragraphs": deleted_kinds.count("p"), "merged_paragraphs": len(flow_edits.merged_blocks),
+                    "fixed_hyphens": len(flow_edits.hyphen_fixes)}
     report_document = {"summary": edit_summary, "edits": list(flow_edits.decision_notes),
                        "blocks": [block_report(flow_block, result_block) for flow_block, result_block
                                   in zip(flow_blocks, worker_result["blocks"], strict=True)]}

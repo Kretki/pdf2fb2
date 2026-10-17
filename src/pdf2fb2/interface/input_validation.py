@@ -5,10 +5,12 @@ import re
 from collections.abc import Callable
 from pathlib import Path, PurePath
 
+from pdf2fb2.text_languages.language_profiles import AUTO_LANGUAGE, KNOWN_PROFILES, find_profile
 from worker_protocol.field_validation import validate_device_name, validate_http_url
 
 LANGUAGE_CODE_PATTERN = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$")
 MAX_TEXT_LENGTH = 512
+MAX_BOOK_LANGUAGES = 8
 
 
 def parse_safe_path(raw_text: str) -> Path:
@@ -28,22 +30,34 @@ def parse_safe_path(raw_text: str) -> Path:
     return Path(raw_text)
 
 
-def parse_existing_pdf(raw_text: str) -> Path:
-    """Accept an existing ``.pdf`` file.
+def existing_book_parser(supported_suffixes: frozenset[str]) -> Callable[[str], Path]:
+    """Build an argparse type accepting an existing book file of a supported format.
 
     Args:
-        raw_text: Path from the command line.
+        supported_suffixes: Lowercase suffixes with the dot, e.g. ``{".pdf", ".djvu"}``.
 
     Returns:
-        The PDF path.
-
-    Raises:
-        argparse.ArgumentTypeError: If the path is unsafe, missing or not a .pdf file.
+        Converter raising ``argparse.ArgumentTypeError`` for unsafe paths, missing files and other formats.
     """
-    pdf_path = parse_safe_path(raw_text)
-    if pdf_path.suffix.lower() != ".pdf" or not pdf_path.is_file():
-        raise argparse.ArgumentTypeError(f"not an existing .pdf file: {raw_text!r}")
-    return pdf_path
+    def parse_existing_book(raw_text: str) -> Path:
+        """Accept one existing book file.
+
+        Args:
+            raw_text: Path from the command line.
+
+        Returns:
+            The book path.
+
+        Raises:
+            argparse.ArgumentTypeError: If the path is unsafe, missing or of an unsupported format.
+        """
+        book_path = parse_safe_path(raw_text)
+        if book_path.suffix.lower() not in supported_suffixes or not book_path.is_file():
+            supported_text = ", ".join(sorted(supported_suffixes))
+            raise argparse.ArgumentTypeError(f"not an existing book file ({supported_text}): {raw_text!r}")
+        return book_path
+
+    return parse_existing_book
 
 
 def parse_existing_directory(raw_text: str) -> Path:
@@ -169,6 +183,34 @@ def parse_language_code(raw_text: str) -> str:
     if not LANGUAGE_CODE_PATTERN.fullmatch(raw_text):
         raise argparse.ArgumentTypeError(f"invalid language code: {raw_text!r}")
     return raw_text
+
+
+def parse_language_list(raw_text: str) -> tuple[str, ...]:
+    """Accept ``auto``, one language code, or several comma-separated codes (main language first).
+
+    Usage:
+        ``--lang en``, ``--lang ja,en,la`` or ``--lang auto``. With several codes each must be a built-in language
+        (see ``text_languages.language_profiles``), since the paragraphs are matched against them.
+
+    Args:
+        raw_text: Value from the command line.
+
+    Returns:
+        Tuple of codes (``("auto",)`` for automatic detection).
+
+    Raises:
+        argparse.ArgumentTypeError: For malformed, repeated, too many or (in a list) unknown codes.
+    """
+    if raw_text.strip().lower() == AUTO_LANGUAGE:
+        return (AUTO_LANGUAGE,)
+    language_codes = tuple(parse_language_code(code_text.strip()) for code_text in raw_text.split(","))
+    if len(set(language_codes)) != len(language_codes) or len(language_codes) > MAX_BOOK_LANGUAGES:
+        raise argparse.ArgumentTypeError(f"give 1..{MAX_BOOK_LANGUAGES} different language codes")
+    unknown_codes = [language_code for language_code in language_codes if find_profile(language_code) is None]
+    if len(language_codes) > 1 and unknown_codes:
+        raise argparse.ArgumentTypeError(f"no built-in profile for {', '.join(unknown_codes)}; known: "
+                                         f"{', '.join(sorted(KNOWN_PROFILES))}")
+    return language_codes
 
 
 def parse_short_text(raw_text: str) -> str:

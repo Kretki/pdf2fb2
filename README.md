@@ -1,6 +1,6 @@
 # pdf2fb2
 
-PDF → FB2 converter. Pages are segmented with **PP-DocLayoutV3** (PaddlePaddle) and every
+PDF/DjVu → FB2 converter. Pages are segmented with **PP-DocLayoutV3** (PaddlePaddle) and every
 text/title/table/footnote segment is read with **Qianfan-OCR** (PyTorch/transformers, 192 languages).
 Bold, italic and strikeout words are detected with **TexTAR** (ICDAR 2025) and kept in the FB2.
 Before the FB2 is written, a local **Qwen3.5-9B** checks every token of the text and removes what does
@@ -87,15 +87,19 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
    printed frame are missed paragraphs: their pages are segmented again (`residual_rescan/`,
    `--residual-threshold`, default 0.3) and each block gets the most probable text-like proposal covering
    it on free page area, or its own box (a title label is kept for one-line blocks only). Report:
-   `residual_rescan/residual_text.json`. Only then Qianfan-OCR reads every text segment, once; spaced
-   ellipses (`. . .`) become `…`.
+   `residual_rescan/residual_text.json`. A `header` lying more than 3% of the page height outside the
+   running-head band is a chapter title set lower on an opening page, not a running head: it becomes
+   `paragraph_title` (running heads are not OCR'd and never reach the FB2). Only then Qianfan-OCR reads
+   every text segment, once; spaced ellipses (`. . .`) become `…`.
    Layout review after OCR: short texts at the top/bottom of pages are read as page numbers (arabic,
    roman, letter-prefixed; OCR confusions such as `IIO`/`x11` tolerated) and every numbering run
    (kind, prefix, page index − value) seen on 3+ pages is a numbering of the book, so several numberings
    per book work; candidates on a run are relabelled `number` (`page_number_value`, `numbering`). Short
    (≤ 10th percentile of paragraph length), centred `text` on sparse pages (text coverage ≤ 30% of the
    median page) that stands apart (5+ glyph heights from other text) or is set larger than the usual font
-   becomes `paragraph_title` (`original_label` keeps the layout label).
+   becomes `paragraph_title` (`original_label` keeps the layout label). So does the first text of a page
+   when it is short, one line (≤ 3 glyph heights tall), centred and 3+ glyph heights above the next text
+   (a chapter or preface title over its first paragraph).
 6. Text styles (`workers/textar_worker`): docTR's DBNet finds the word boxes of every final page
    (the detector TexTAR was trained with), TexTAR classifies each word in context windows of 125
    neighbouring words (normal / bold / italic / bold+italic and none / underline / strikeout), and
@@ -122,24 +126,53 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
      head); when the sentence runs through it, the paragraphs on both sides are re-joined, which also
      removes the wrong section split.
    * A paragraph break is removed when the joined text is more probable by 2 nats or more.
+   * A word split by a line-break hyphen that OCR kept with a space (`дискути- ровали`, `grand - father`,
+     `the -tall`) is scored in three spellings (as read, `grand-father`, `grandfather`) with the same
+     context and following words; a hyphen stuck to the next word (`the -tall`) may be a speck, so there
+     separate words (`the tall`) are a fourth spelling. The most probable spelling is written, keeping style
+     tags (report action `fix_hyphen`). Without proofreading (`--no-proofread`) such words stay as read.
 10. FB2 rendering and checks.
 
 `--keep-marks` skips the handwriting check and steps 3–4, `--debug-marks` writes `marks/<page>/debug.png` overlays,
 `--no-styles` skips steps 6–7 (`--textar-model-dir`, `--doctr-model-dir` change the weight folders),
 `--no-proofread` skips step 9 (`--proofread-model-dir` changes the language model folder),
 `--no-picture-recovery` skips the picture recovery of step 5, `--no-residual-text` the residual text,
-`--no-layout-review` the layout review after OCR.
+`--no-layout-review` the label statistics before and after OCR (running heads, page numbers, headings).
 
 ## Usage
 
 ```bash
-uv run pdf2fb2 book.pdf -o out --lang en      # or: uv run main.py book.pdf -o out
-uv run pdf2fb2 --selftest -o out              # two-page generated test PDF
+uv run pdf2fb2 input/book.pdf --lang en       # results in output/book/ (or: uv run main.py input/book.pdf)
+uv run pdf2fb2 book.djvu -o some/dir          # explicit result folder for one book
+uv run pdf2fb2 --batch                        # every book under input/ -> output/<sub-folders>/<book name>/
+uv run pdf2fb2 --batch --input-dir shelf --output-root converted
+uv run pdf2fb2 --selftest                     # two-page generated test PDF, in output/selftest/
 
 # faster OCR: serve Qianfan-OCR with vLLM (in its own env) and use the HTTP backend
 vllm serve models/Qianfan-OCR --served-model-name Qianfan-OCR
 uv run pdf2fb2 book.pdf --qianfan-url http://localhost:8000/v1 --workers 8
 ```
+
+**Input formats.** `.pdf` is read directly. `.djvu`/`.djv` is first converted losslessly to
+`<result folder>/source/<book name>.pdf` with DjVuLibre's `ddjvu` (install it with `sudo apt install djvulibre-bin`);
+the converted file is reused while it is newer than the DjVu file.
+
+**Batch mode.** `--batch` converts every `.pdf`/`.djvu`/`.djv` under `--input-dir` (default `input/`, sub-folders
+included; hidden files and links leading outside it are skipped) into `--output-root` (default `output/`), one
+folder per book named after the file and mirroring the sub-folders. Books of one folder with the same name
+(`a.pdf`, `a.djvu`) get `a_pdf/`, `a_djvu/`. A failing book does not stop the batch; one summary line per book is
+printed at the end and the exit code is 1 if any book failed or did not pass its checks. `-o`, `--title`,
+`--author` and a book path name a single book and are rejected with `--batch`.
+
+**Languages.** `--lang ru` declares a single-language book (as before). `--lang ja,en,la` declares several,
+main language first: every paragraph, title, caption and note gets its language from its letters' scripts
+(kana → Japanese, Han only → Chinese, Cyrillic, Greek, ...) and, for languages sharing a script, from their
+frequent short words; paragraphs not in the main language get `xml:lang`, and a foreign run inside a paragraph
+(two words or more, in a script the paragraph's language does not use: an English quotation in Japanese text)
+is wrapped in `<style name="foreign" xml:lang="..">`. `--lang auto` picks among all built-in languages
+(`ar de el en es fr he hi it ja ko la pl pt ru th uk zh`) and writes the language with the most text to `<lang>`.
+Chinese/Japanese/Thai lines and page-broken paragraphs are joined without a space. Qianfan-OCR reads all of these
+scripts with the same prompt, so OCR needs no language setting.
 
 In a terminal the run shows one overall progress bar and, under it, the current step
 (`extracting pages from pdf 3/20`, `segmenting page 7/40`, `parsing block 2/5 on page 3/10`).
@@ -153,7 +186,9 @@ Output directory: `pages/` (renders), `vis/` (segmentation drawings), `ocr_crops
 pages flagged `"rescanned": true`) and `<name>.fb2`. Worker output (model loading, warnings,
 tracebacks) goes to `layout_job.log` / `ocr_job.log` / `marks_job.log` / `style_job.log` / `proofread_job.log`.
 
-Source layout (`src/pdf2fb2`): `interface/` (CLI, argument validation, self-test PDF), `pipeline/`
+Source layout (`src/pdf2fb2`): `interface/` (CLI, argument validation, book discovery and batch runs, pipeline
+wiring, self-test PDF), `document_sources/` (input formats: PDF, DjVu → PDF), `text_languages/` (scripts,
+language profiles and detection, multilingual FB2 markup), `pipeline/`
 (orchestration, stage contracts, reader-mark rescan and page merging, checks), `model_stages/`
 (layout, OCR, reader-mark and text-style worker stages), `text_styling/` (word order, token alignment,
 style clean-up and markup), `proofreading/` (flow blocks, test selection, edit decisions, flow edits, report), `worker_runtime/` (worker venvs and launcher), `progress/`,

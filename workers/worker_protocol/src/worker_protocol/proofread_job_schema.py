@@ -6,14 +6,17 @@ gives every token a log-probability from its left context, and runs deletion tes
 * ``word`` tests for every word whose least probable token is below ``candidate_logprob``;
 * ``block`` tests for the blocks listed in ``block_checks`` (suspected wrong headings / stray lines);
 * ``break`` tests for the paragraph breaks listed in ``break_checks`` (block index of the break's
-  second block: is it one paragraph wrongly split in two?).
+  second block: is it one paragraph wrongly split in two?);
+* ``rewrite`` tests for the word spans listed in ``rewrite_checks`` (which spelling reads best, see
+  ``worker_protocol.rewrite_checks``).
 
 A test compares the log-probability of the text that follows the unit with and without it.
 
 Result: JSON document ``{"blocks": [{"words": [{"tokens": [[text, logprob], ...],
 "min_logprob": float, "mean_logprob": float}]}], "word_checks": [{"block": int, "word": int,
 "keep": float, "drop": float}], "block_checks": [{"block": int, "keep": float, "drop_separate":
-float, "drop_merged": float}], "break_checks": [{"block": int, "keep": float, "merged": float}]}``.
+float, "drop_merged": float}], "break_checks": [{"block": int, "keep": float, "merged": float}],
+"rewrite_checks": [{"block": int, "word": int, "count": int, <variant name>: float, ...}]}``.
 """
 
 from dataclasses import dataclass
@@ -29,6 +32,7 @@ from worker_protocol.field_validation import (
 )
 from worker_protocol.job_schema import checked_relative_path
 from worker_protocol.path_safety import resolve_inside_directory
+from worker_protocol.rewrite_checks import RewriteCheck, validate_rewrite_checks
 
 BLOCK_KINDS = frozenset({"p", "heading", "caption"})
 MAX_BLOCKS = 500_000
@@ -162,6 +166,7 @@ class ProofreadJob:
         break_checks: Indexes of blocks whose break from the previous block is tested.
         proofread_settings: Analysis limits.
         result_file: Relative path of the JSON result document.
+        rewrite_checks: Word spans whose spellings are compared.
     """
 
     work_directory: Path
@@ -172,6 +177,7 @@ class ProofreadJob:
     break_checks: tuple[int, ...]
     proofread_settings: ProofreadSettings
     result_file: str
+    rewrite_checks: tuple[RewriteCheck, ...] = ()
 
     def to_payload(self) -> dict:
         """Serialise the job to a JSON-compatible object.
@@ -185,7 +191,8 @@ class ProofreadJob:
         return {"work_directory": str(self.work_directory), "model_directory": str(self.model_directory),
                 "device_name": self.device_name, "blocks": [text_block.to_payload() for text_block in self.text_blocks],
                 "block_checks": list(self.block_checks), "break_checks": list(self.break_checks),
-                "settings": self.proofread_settings.to_payload(), "result_file": self.result_file}
+                "settings": self.proofread_settings.to_payload(), "result_file": self.result_file,
+                "rewrite_checks": [rewrite_check.to_payload() for rewrite_check in self.rewrite_checks]}
 
     @classmethod
     def from_payload(cls, job_payload: dict) -> "ProofreadJob":
@@ -216,6 +223,8 @@ class ProofreadJob:
             break_checks=validate_block_indexes(job_payload, "break_checks", len(text_blocks)),
             proofread_settings=ProofreadSettings.from_payload(job_payload.get("settings")),
             result_file=checked_relative_path(work_directory, require_string(job_payload, "result_file")),
+            rewrite_checks=validate_rewrite_checks(job_payload, [len(text_block.block_words)
+                                                                 for text_block in text_blocks]),
         )
 
     def resolve_inside(self, relative_path: str) -> Path:

@@ -9,6 +9,8 @@ All tests compare the log-probability of the text that follows a unit with and w
 * headings: a heading is wrong when the text reads on without it; repeating heading text
   (running heads, strongest when it heads many pages) and a heading inside an unfinished
   sentence add evidence.
+
+Words split by a line-break hyphen get the spelling the model finds most probable (see ``hyphen_repair``).
 """
 
 import math
@@ -19,6 +21,7 @@ from dataclasses import dataclass
 from pdf2fb2.fb2_output.text_markup import NOTE_TOKEN_PATTERN, SENTENCE_END_PATTERN, STYLE_TAG_PATTERN
 from pdf2fb2.proofreading.check_selection import SHORT_BLOCK_WORDS
 from pdf2fb2.proofreading.flow_blocks import FlowBlock
+from pdf2fb2.proofreading.hyphen_repair import HyphenFix, decide_hyphen_fixes
 
 NOISE_COST = math.log(60.0)  # nats per character of a random OCR string
 LETTER_PRIOR = -6.0          # a token made of letters is rarely noise
@@ -44,12 +47,14 @@ class FlowEdits:
         deleted_blocks: Blocks removed entirely.
         merged_blocks: Blocks joined to the previous paragraph.
         decision_notes: Human-readable reasons for the report.
+        hyphen_fixes: Respelled hyphen breaks.
     """
 
     deleted_words: frozenset[tuple[int, int]]
     deleted_blocks: frozenset[int]
     merged_blocks: frozenset[int]
     decision_notes: tuple[dict, ...]
+    hyphen_fixes: tuple[HyphenFix, ...] = ()
 
 
 def own_logprob(result_blocks: list[dict], block_index: int, word_indexes: range) -> float:
@@ -229,5 +234,6 @@ def decide_edits(flow_blocks: list[FlowBlock], worker_result: dict) -> FlowEdits
                    for break_check in worker_result["break_checks"]
                    if break_check["merged"] - break_check["keep"] >= BREAK_MARGIN]
     merged_blocks |= {break_note["block"] for break_note in break_notes}
+    hyphen_fixes, hyphen_notes = decide_hyphen_fixes(worker_result)
     return FlowEdits(frozenset(deleted_words), frozenset(deleted_blocks), frozenset(merged_blocks - deleted_blocks),
-                     tuple(decision_notes + block_notes + break_notes))
+                     tuple(decision_notes + block_notes + break_notes + hyphen_notes), tuple(hyphen_fixes))

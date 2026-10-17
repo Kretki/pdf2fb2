@@ -7,8 +7,9 @@ import re
 from xml.etree import ElementTree  # nosec B405  # noqa: S405
 
 from pdf2fb2.fb2_output.fb2_namespaces import XLINK_NAMESPACE
+from pdf2fb2.text_languages.script_detection import is_spaceless_character
 
-SENTENCE_END_PATTERN = re.compile(r"[.!?…:;»\"”’)\]]\s*$")
+SENTENCE_END_PATTERN = re.compile(r"[.!?…:;»\"”’)\]。！？．」』）]\s*$")
 LIST_ITEM_PATTERN = re.compile(r"^([-*+•]|\d+[.)])\s+")
 BULLET_PATTERN = re.compile(r"^[-*+•]\s+")
 MARKDOWN_HEADING_PATTERN = re.compile(r"^\s{0,3}#{1,6}\s+", re.M)
@@ -115,10 +116,14 @@ def join_text_fragments(leading_text: str, trailing_text: str) -> str:
         trailing_text: Text after the break.
 
     Returns:
-        Joined text: hyphen removed if a hyphenated word continues in lowercase, else a space.
+        Joined text: hyphen removed if a hyphenated word continues in lowercase; no space between two
+        characters of scripts written without spaces (Chinese, Japanese, Thai); else a space.
     """
     if HYPHENATED_END_PATTERN.search(visible_text(leading_text)) and visible_text(trailing_text)[:1].islower():
         return leading_text[:-1] + trailing_text
+    if is_spaceless_character(visible_text(leading_text).rstrip()[-1:]) and is_spaceless_character(
+            visible_text(trailing_text).lstrip()[:1]):
+        return leading_text.rstrip() + trailing_text.lstrip()
     return leading_text + " " + trailing_text
 
 

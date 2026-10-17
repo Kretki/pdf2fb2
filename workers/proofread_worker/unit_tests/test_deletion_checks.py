@@ -2,7 +2,9 @@
 
 from proofread_worker.deletion_checks import block_check, break_check, word_check
 from proofread_worker.document_text import build_document_text
+from proofread_worker.rewrite_variants import rewrite_request
 from worker_protocol.proofread_job_schema import TextBlock
+from worker_protocol.rewrite_checks import RewriteCheck
 
 
 def sample_document():
@@ -55,3 +57,15 @@ def test_impossible_checks_are_skipped() -> None:
     assert word_check(document_text, len(document_text.word_spans) - 1, 200, 3) is None
     assert block_check(document_text, 2, 200, 3) is None
     assert break_check(document_text, 0, 200, 3) is None
+
+
+def test_rewrite_variants_score_spelling_and_continuation_from_one_context() -> None:
+    """Every spelling replaces the span and is measured from the end of the shared context."""
+    rewrite_check = RewriteCheck(2, 0, 2, (("kept", "old mis- sion"), ("joined", "oldmission")))
+    check_request = rewrite_request(sample_document(), rewrite_check, 200, 2)
+    (kept_text, kept_start), (joined_text, joined_start) = check_request.scored_variants
+    assert kept_start == joined_start == len("He rode to the\n\nRunning Head")
+    assert kept_text[kept_start:] == "\n\nold mis- sion at dawn."
+    assert joined_text[joined_start:] == "\n\noldmission at dawn."
+    assert check_request.variant_names == ("kept", "joined")
+    assert check_request.check_target == {"block": 2, "word": 0, "count": 2}

@@ -8,6 +8,7 @@ from pdf2fb2.worker_runtime.worker_launcher import WorkerFailedError, WorkerLaun
 from worker_protocol.json_files import read_json_document, write_json_document
 from worker_protocol.progress_events import MODEL_LOADING_EVENT, PROOFREAD_PROGRESS_EVENT, read_counter_field
 from worker_protocol.proofread_job_schema import MAX_WORD_LENGTH, ProofreadJob, ProofreadSettings, TextBlock
+from worker_protocol.rewrite_checks import RewriteCheck
 
 PROOFREAD_JOB_FILE = "proofread_job.json"
 PROOFREAD_RESULT_FILE = "proofread_result.json"
@@ -60,12 +61,31 @@ class ProofreadProgressRelay:
                                            f"proofreading: {phase_label} {done_count}/{total_count}")
 
 
-def validate_result(worker_result: object, text_blocks: tuple[TextBlock, ...]) -> dict:
+def matches_rewrite(rewrite_entry: object, rewrite_check: RewriteCheck) -> bool:
+    """Tell whether a rewrite result answers its test.
+
+    Args:
+        rewrite_entry: Result entry.
+        rewrite_check: Test sent in the job.
+
+    Returns:
+        True when the span matches and every variant has a numeric score.
+    """
+    return (isinstance(rewrite_entry, dict) and rewrite_entry.get("block") == rewrite_check.block_index
+            and rewrite_entry.get("word") == rewrite_check.word_index
+            and rewrite_entry.get("count") == rewrite_check.word_count
+            and all(isinstance(rewrite_entry.get(variant_name), (int, float))
+                    for variant_name, _ in rewrite_check.variant_texts))
+
+
+def validate_result(worker_result: object, text_blocks: tuple[TextBlock, ...],
+                    rewrite_checks: tuple[RewriteCheck, ...] = ()) -> dict:
     """Check that the worker result matches the job.
 
     Args:
         worker_result: Decoded result document.
         text_blocks: Blocks of the job.
+        rewrite_checks: Rewrite tests of the job (answered in the same order).
 
     Returns:
         The result.
@@ -86,6 +106,11 @@ def validate_result(worker_result: object, text_blocks: tuple[TextBlock, ...]) -
                 and all(isinstance(check_entry.get(score_field), (int, float)) for score_field in score_fields)
                 for check_entry in group_entries):
             raise WorkerFailedError(f"Proofread worker returned malformed {check_group}.")
+    rewrite_entries = worker_result.get("rewrite_checks", [])
+    if not isinstance(rewrite_entries, list) or len(rewrite_entries) != len(rewrite_checks) or not all(
+            matches_rewrite(rewrite_entry, rewrite_check)
+            for rewrite_entry, rewrite_check in zip(rewrite_entries, rewrite_checks, strict=True)):
+        raise WorkerFailedError("Proofread worker returned malformed rewrite_checks.")
     return worker_result
 
 
@@ -112,13 +137,15 @@ class ProofreadStage:
         self._device_name = device_name
 
     def score_blocks(self, block_words: list[tuple[str, tuple[str, ...]]], block_checks: list[int],
-                     break_checks: list[int], work_directory: Path, stage_progress: StageProgress) -> dict:
-        """Score every token and run the deletion tests.
+                     break_checks: list[int], rewrite_checks: list[RewriteCheck], work_directory: Path,
+                     stage_progress: StageProgress) -> dict:
+        """Score every token and run the deletion and rewrite tests.
 
         Args:
             block_words: ``(kind, plain words)`` per block in reading order.
             block_checks: Blocks to test for deletion.
             break_checks: Blocks whose break from the previous block is tested.
+            rewrite_checks: Word spans whose spellings are compared.
             work_directory: Output directory for the job and result files.
             stage_progress: Receives proofreading progress.
 
@@ -133,7 +160,8 @@ class ProofreadStage:
         proofread_job = ProofreadJob(
             work_directory=work_directory.resolve(), model_directory=self._model_directory.resolve(),
             device_name=self._device_name, text_blocks=text_blocks, block_checks=tuple(block_checks),
-            break_checks=tuple(break_checks), proofread_settings=DEFAULT_SETTINGS, result_file=PROOFREAD_RESULT_FILE)
+            break_checks=tuple(break_checks), proofread_settings=DEFAULT_SETTINGS, result_file=PROOFREAD_RESULT_FILE,
+            rewrite_checks=tuple(rewrite_checks))
         job_file = work_directory / PROOFREAD_JOB_FILE
         write_json_document(job_file, proofread_job.to_payload())
         stage_progress.advance_stage(0, PROGRESS_STEPS, "starting proofread worker")
@@ -141,4 +169,5 @@ class ProofreadStage:
                                                          ProofreadProgressRelay(stage_progress))
         if worker_run.exit_code != 0:
             raise WorkerFailedError(describe_worker_failure("Proofread worker", worker_run))
-        return validate_result(read_json_document(proofread_job.resolve_inside(PROOFREAD_RESULT_FILE)), text_blocks)
+        return validate_result(read_json_document(proofread_job.resolve_inside(PROOFREAD_RESULT_FILE)), text_blocks,
+                               proofread_job.rewrite_checks)

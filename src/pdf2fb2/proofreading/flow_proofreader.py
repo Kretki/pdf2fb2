@@ -9,7 +9,9 @@ from pdf2fb2.proofreading.check_selection import block_check_indexes, break_chec
 from pdf2fb2.proofreading.edit_decisions import decide_edits
 from pdf2fb2.proofreading.flow_blocks import collect_flow_blocks
 from pdf2fb2.proofreading.flow_editing import apply_flow_edits
+from pdf2fb2.proofreading.hyphen_repair import find_hyphen_breaks, rewrite_checks_for
 from pdf2fb2.proofreading.proofread_report import write_proofread_report
+from worker_protocol.rewrite_checks import RewriteCheck
 
 PROOFREAD_REPORT_FILE = "proofread_report.json"
 
@@ -18,13 +20,15 @@ class BlockScorer(Protocol):
     """Scores text blocks with a language model (see ``model_stages.proofread_stage``)."""
 
     def score_blocks(self, block_words: list[tuple[str, tuple[str, ...]]], block_checks: list[int],
-                     break_checks: list[int], work_directory: Path, stage_progress: StageProgress) -> dict:
-        """Token probabilities and deletion-test scores.
+                     break_checks: list[int], rewrite_checks: list[RewriteCheck], work_directory: Path,
+                     stage_progress: StageProgress) -> dict:
+        """Token probabilities, deletion-test and rewrite-test scores.
 
         Args:
             block_words: ``(kind, plain words)`` per block.
             block_checks: Blocks to test for deletion.
             break_checks: Blocks whose preceding break is tested.
+            rewrite_checks: Word spans whose spellings are compared.
             work_directory: Output directory.
             stage_progress: Progress sink.
 
@@ -69,7 +73,8 @@ class LanguageModelProofreader:
             return {}
         worker_result = self._block_scorer.score_blocks(
             [(flow_block.block_kind, flow_block.plain_words) for flow_block in flow_blocks],
-            block_check_indexes(flow_blocks), break_check_indexes(flow_blocks), work_directory, stage_progress)
+            block_check_indexes(flow_blocks), break_check_indexes(flow_blocks),
+            rewrite_checks_for(flow_blocks, find_hyphen_breaks(flow_blocks)), work_directory, stage_progress)
         flow_edits = decide_edits(flow_blocks, worker_result)
         edit_summary = write_proofread_report(work_directory / PROOFREAD_REPORT_FILE, flow_blocks, worker_result,
                                               flow_edits)

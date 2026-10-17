@@ -12,9 +12,11 @@ from pdf2fb2.fb2_output.binary_store import BinaryStore
 from pdf2fb2.fb2_output.book_flow import build_book_flow
 from pdf2fb2.fb2_output.fb2_namespaces import FB2_NAMESPACE, XLINK_NAMESPACE
 from pdf2fb2.fb2_output.flow_model import BookFlow
+from pdf2fb2.fb2_output.paragraph_markup import ParagraphMarkup
 from pdf2fb2.fb2_output.section_tree import render_body_sections
-from pdf2fb2.fb2_output.text_markup import escape_text, markdown_to_fb2_inline
+from pdf2fb2.fb2_output.text_markup import escape_text
 from pdf2fb2.rendering.pdf_rendering import render_cover_image
+from pdf2fb2.text_languages.language_markup import build_paragraph_markup
 
 COVER_BINARY_ID = "cover.jpg"
 XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -29,10 +31,12 @@ class BookOptions:
         book_title: Title override (None: detected title, PDF metadata, file name).
         author_name: Author override (None: PDF metadata).
         genre_name: FB2 genre code, e.g. ``nonfiction``.
-        language_code: Book language code, e.g. ``en``, ``ru``.
+        language_code: Main language code, e.g. ``en``, ``ru``; ``auto`` takes the language with the most text.
         page_marker_mode: ``anchor``, ``visible`` or ``none``.
         segmentation_dpi: DPI the page images were rendered at.
         image_dpi: DPI for embedded pictures.
+        book_languages: Languages the book is written in, main first; with two or more, paragraphs and foreign
+            runs get ``xml:lang`` (empty: single-language book).
     """
 
     book_title: str | None
@@ -42,6 +46,7 @@ class BookOptions:
     page_marker_mode: str
     segmentation_dpi: int
     image_dpi: int
+    book_languages: tuple[str, ...] = ()
 
 
 def _choose_title(book_options: BookOptions, book_flow: BookFlow, pdf_metadata: dict, pdf_path: Path) -> str:
@@ -76,13 +81,14 @@ def _author_xml(author_text: str) -> str:
     return f"<nickname>{escape_text(name_parts[0] if name_parts else 'Unknown')}</nickname>"
 
 
-def _description_xml(book_options: BookOptions, book_title: str, author_text: str) -> str:
+def _description_xml(book_options: BookOptions, book_title: str, author_text: str, main_language: str) -> str:
     """Render the ``<description>`` element (title-info and document-info).
 
     Args:
         book_options: FB2 settings.
         book_title: Chosen title.
         author_text: Chosen author name.
+        main_language: Resolved main language code.
 
     Returns:
         Description markup.
@@ -92,7 +98,7 @@ def _description_xml(book_options: BookOptions, book_title: str, author_text: st
             f"<genre>{escape_text(book_options.genre_name)}</genre><author>{_author_xml(author_text)}</author>"
             f"<book-title>{escape_text(book_title)}</book-title>"
             f'<coverpage><image l:href="#{COVER_BINARY_ID}"/></coverpage>'
-            f"<lang>{escape_text(book_options.language_code)}</lang>"
+            f"<lang>{escape_text(main_language)}</lang>"
             "</title-info><document-info>"
             "<author><nickname>pdf2fb2</nickname></author>"
             f"<program-used>{PROGRAM_NAME}</program-used>"
@@ -101,11 +107,26 @@ def _description_xml(book_options: BookOptions, book_title: str, author_text: st
             "</document-info></description>")
 
 
-def _notes_body_xml(footnotes: list[dict]) -> str:
+def _paragraph_xml(paragraph_markup: ParagraphMarkup, markdown_text: str) -> str:
+    """Render one ``<p>`` element.
+
+    Args:
+        paragraph_markup: Paragraph rendering strategy.
+        markdown_text: Paragraph text (Markdown inline).
+
+    Returns:
+        ``<p ...>...</p>`` markup.
+    """
+    language_attribute, paragraph_body = paragraph_markup.render_paragraph(markdown_text)
+    return f"<p{language_attribute}>{paragraph_body}</p>"
+
+
+def _notes_body_xml(footnotes: list[dict], paragraph_markup: ParagraphMarkup) -> str:
     """Render the notes body.
 
     Args:
         footnotes: Notes from the book flow.
+        paragraph_markup: Paragraph rendering strategy.
 
     Returns:
         ``<body name="notes">`` markup, or an empty string when there are no notes.
@@ -114,7 +135,7 @@ def _notes_body_xml(footnotes: list[dict]) -> str:
         return ""
     note_sections = "".join(
         f'<section id="{footnote["id"]}"><title><p>{escape_text(footnote["marker"])}</p></title>'
-        f'<p>{markdown_to_fb2_inline(footnote["text"])}</p></section>' for footnote in footnotes)
+        f'{_paragraph_xml(paragraph_markup, footnote["text"])}</section>' for footnote in footnotes)
     return f'<body name="notes"><title><p>Notes</p></title>{note_sections}</body>'
 
 
@@ -197,6 +218,19 @@ def prepare_book(pdf_path: Path, page_records: list[dict], book_options: BookOpt
     return PreparedBook(book_flow=book_flow, binary_store=binary_store, pdf_metadata=pdf_metadata)
 
 
+def flow_texts(book_flow: BookFlow) -> list[str]:
+    """Texts of a book flow: paragraphs, headings, captions and notes.
+
+    Args:
+        book_flow: Built flow.
+
+    Returns:
+        Their Markdown texts in flow order, notes last.
+    """
+    return ([flow_item["text"] for flow_item in book_flow.flow_items if isinstance(flow_item.get("text"), str)]
+            + [footnote["text"] for footnote in book_flow.footnotes])
+
+
 def render_prepared_book(prepared_book: PreparedBook, pdf_path: Path, book_options: BookOptions) -> tuple[str, dict]:
     """Render the FB2 XML of a prepared book.
 
@@ -211,12 +245,14 @@ def render_prepared_book(prepared_book: PreparedBook, pdf_path: Path, book_optio
     book_flow, binary_store = prepared_book.book_flow, prepared_book.binary_store
     book_title = _choose_title(book_options, book_flow, prepared_book.pdf_metadata, pdf_path)
     author_text = book_options.author_name or (prepared_book.pdf_metadata.get("author") or "").strip()
-    body_xml = render_body_sections(book_flow.flow_items, book_options.page_marker_mode)
+    paragraph_markup = build_paragraph_markup(book_options.book_languages, book_options.language_code,
+                                              flow_texts(book_flow))
+    body_xml = render_body_sections(book_flow.flow_items, book_options.page_marker_mode, paragraph_markup)
     fb2_markup = "".join([
         XML_DECLARATION, f'<FictionBook xmlns="{FB2_NAMESPACE}" xmlns:l="{XLINK_NAMESPACE}">',
-        _description_xml(book_options, book_title, author_text),
-        f"<body><title><p>{markdown_to_fb2_inline(book_title)}</p></title>{body_xml}</body>",
-        _notes_body_xml(book_flow.footnotes), _binaries_xml(binary_store), "</FictionBook>"])
+        _description_xml(book_options, book_title, author_text, paragraph_markup.main_language),
+        f"<body><title>{_paragraph_xml(paragraph_markup, book_title)}</title>{body_xml}</body>",
+        _notes_body_xml(book_flow.footnotes, paragraph_markup), _binaries_xml(binary_store), "</FictionBook>"])
     return fb2_markup, collect_statistics(book_flow, binary_store)
 
 

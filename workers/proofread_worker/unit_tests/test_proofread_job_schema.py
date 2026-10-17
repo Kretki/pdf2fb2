@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from worker_protocol.proofread_job_schema import ProofreadJob, ProofreadSettings, TextBlock
+from worker_protocol.rewrite_checks import RewriteCheck
 
 
 def build_job(work_directory: Path) -> ProofreadJob:
@@ -19,7 +20,8 @@ def build_job(work_directory: Path) -> ProofreadJob:
     return ProofreadJob(work_directory=work_directory, model_directory=work_directory, device_name="cpu",
                         text_blocks=(TextBlock("p", ("One", "two.")), TextBlock("heading", ("Title",))),
                         block_checks=(1,), break_checks=(1,),
-                        proofread_settings=ProofreadSettings(-9.0, 1200, 12, 100), result_file="result.json")
+                        proofread_settings=ProofreadSettings(-9.0, 1200, 12, 100), result_file="result.json",
+                        rewrite_checks=(RewriteCheck(0, 0, 2, (("kept", "One two."), ("joined", "Onetwo."))),))
 
 
 def test_payload_round_trip(tmp_path: Path) -> None:
@@ -48,5 +50,16 @@ def test_result_path_traversal_is_rejected(tmp_path: Path) -> None:
     """The result must stay inside the working directory."""
     job_payload = build_job(tmp_path).to_payload()
     job_payload["result_file"] = "../result.json"
+    with pytest.raises(ValueError):
+        ProofreadJob.from_payload(job_payload)
+
+
+def test_rewrite_span_must_lie_inside_its_block(tmp_path: Path) -> None:
+    """A rewrite span running past the block end or a variant with a bad name is rejected."""
+    job_payload = build_job(tmp_path).to_payload()
+    job_payload["rewrite_checks"][0]["word"] = 1
+    with pytest.raises(ValueError):
+        ProofreadJob.from_payload(job_payload)
+    job_payload["rewrite_checks"][0].update(word=0, variants={"Kept!": "One two.", "joined": "Onetwo."})
     with pytest.raises(ValueError):
         ProofreadJob.from_payload(job_payload)
