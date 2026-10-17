@@ -152,6 +152,39 @@ class PictureRecoverer(Protocol):
         ...
 
 
+class ResidualTextFinder(Protocol):
+    """Adds segments for text the layout passes left outside every segment."""
+
+    def add_residual_text(self, page_records: list[dict], work_directory: Path, stage_progress: StageProgress) -> int:
+        """Find letters of the usual font size outside every segment and add segments for them.
+
+        Args:
+            page_records: Final segmented page records, not yet OCR'd (mutated).
+            work_directory: Conversion output directory.
+            stage_progress: Receives the step's progress.
+
+        Returns:
+            Number of added segments.
+        """
+        ...
+
+
+class LayoutReviewer(Protocol):
+    """Corrects segment labels once the text of the segments is known."""
+
+    def review_layout(self, page_records: list[dict], stage_progress: StageProgress) -> int:
+        """Apply the label corrections to the OCR'd pages.
+
+        Args:
+            page_records: OCR'd page records (mutated).
+            stage_progress: Receives the step's progress.
+
+        Returns:
+            Number of relabelled segments.
+        """
+        ...
+
+
 class SegmentRecognizer(Protocol):
     """Fills the ``text`` field of every segment that needs OCR."""
 

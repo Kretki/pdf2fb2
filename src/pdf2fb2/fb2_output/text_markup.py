@@ -18,6 +18,9 @@ HYPHENATED_END_PATTERN = re.compile(r"\w[-­]$")
 THINKING_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.S)
 CODE_FENCE_PATTERN = re.compile(r"^\s*```[a-zA-Z]*\s*$", re.M)
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # invalid in XML 1.0
+SPACED_ELLIPSIS_PATTERN = re.compile(r"\.(?:[ \u00a0]?\.){2}")  # ". . ." or "..." as typeset or read by OCR
+ELLIPSIS_CHARACTER = "\u2026"
+ELLIPSIS_FULL_STOP_PATTERN = re.compile(r"\u2026[ \u00a0]\.")  # "… ." left by a spaced four-dot ellipsis
 NOTE_TOKEN_PATTERN = re.compile(r"\x00NOTE:(\w+):([^\x00]+)\x00")
 NOTE_LINK_TEMPLATE = r'<a l:href="#\1" type="note">\2</a>'
 PLAIN_MARKUP_PATTERN = re.compile(r"</?(?:sup|sub|b|i|s|strong|em|del|strike)>|\*\*|__|~~|`")
@@ -71,6 +74,22 @@ def clean_ocr_text(raw_text: str | None) -> str:
     cleaned_text = THINKING_BLOCK_PATTERN.sub("", raw_text or "")
     cleaned_text = CODE_FENCE_PATTERN.sub("", cleaned_text)
     return CONTROL_CHARACTER_PATTERN.sub("", cleaned_text).strip()
+
+
+def normalize_ellipsis(ocr_text: str) -> str:
+    """Replace three dots, spaced or not, by the ellipsis character.
+
+    Usage:
+        Call on OCR text before it is put into the segments; a fourth dot stays as the full stop after it.
+
+    Args:
+        ocr_text: Text read by the OCR model.
+
+    Returns:
+        Text with ``. . .`` and ``...`` replaced by ``…``; ``. . . .`` and ``....`` become ``….``.
+    """
+    return ELLIPSIS_FULL_STOP_PATTERN.sub(ELLIPSIS_CHARACTER + ".",
+                                          SPACED_ELLIPSIS_PATTERN.sub(ELLIPSIS_CHARACTER, ocr_text))
 
 
 def visible_text(styled_text: str) -> str:

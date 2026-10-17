@@ -19,7 +19,8 @@ models/qwen3.5-9B/*
 readermarks_data
 test_res
 test.sh
-*.pdf
+input/*
+output/*
 # Conversion output and uv lock temp files
 pdf2fb2_output
 *.tmp

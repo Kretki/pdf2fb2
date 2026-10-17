@@ -68,6 +68,8 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
    segments found by the layout model are blanked first (printed pictures are never taken for hand
    drawings), then handwritten notes, pen/pencil underlines and margin marks are detected and removed.
 4. Pages with marks are re-segmented: the cleaned page goes through the layout model again (`rescan/`).
+   Rescan segments lying mostly inside a first-pass `handwritten` segment are dropped (a hand-lettered note
+   the cleaner did not erase is found again, but stays handwritten).
 5. Final records = first-pass pictures + first-pass segments of unmarked pages + re-segmented
    cleaned pages. Picture recovery: OpenCV measures the median glyph height of every segment
    (`glyph_height` in `segments.json`); the median over the plain paragraphs is the usual font size
@@ -77,7 +79,23 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
    The most probable picture proposal covering the region (and more probable than the text it would
    replace) becomes an `image` segment that also takes in the text it covers and adjacent text whose
    glyphs are outside the normal range (`recovered_from` keeps their labels). Statistics and outcomes:
-   `picture_rescan/font_statistics.json`. Only then Qianfan-OCR reads every text segment, once.
+   `picture_rescan/font_statistics.json`.
+   Residual text: with every segment blanked, letters of the usual size (0.5x..2x) still on the page are
+   grouped into lines and blocks. Pieces in the band where the book prints its running heads or page
+   numbers (median position of the `header` / `number` segments, per page parity) are added as such;
+   blocks of 12+ glyphs right under a picture become captions (`figure_title`); other blocks inside the
+   printed frame are missed paragraphs: their pages are segmented again (`residual_rescan/`,
+   `--residual-threshold`, default 0.3) and each block gets the most probable text-like proposal covering
+   it on free page area, or its own box (a title label is kept for one-line blocks only). Report:
+   `residual_rescan/residual_text.json`. Only then Qianfan-OCR reads every text segment, once; spaced
+   ellipses (`. . .`) become `…`.
+   Layout review after OCR: short texts at the top/bottom of pages are read as page numbers (arabic,
+   roman, letter-prefixed; OCR confusions such as `IIO`/`x11` tolerated) and every numbering run
+   (kind, prefix, page index − value) seen on 3+ pages is a numbering of the book, so several numberings
+   per book work; candidates on a run are relabelled `number` (`page_number_value`, `numbering`). Short
+   (≤ 10th percentile of paragraph length), centred `text` on sparse pages (text coverage ≤ 30% of the
+   median page) that stands apart (5+ glyph heights from other text) or is set larger than the usual font
+   becomes `paragraph_title` (`original_label` keeps the layout label).
 6. Text styles (`workers/textar_worker`): docTR's DBNet finds the word boxes of every final page
    (the detector TexTAR was trained with), TexTAR classifies each word in context windows of 125
    neighbouring words (normal / bold / italic / bold+italic and none / underline / strikeout), and
@@ -109,7 +127,8 @@ Optional: point to other interpreters with `PDF2FB2_LAYOUT_PYTHON` / `PDF2FB2_OC
 `--keep-marks` skips the handwriting check and steps 3–4, `--debug-marks` writes `marks/<page>/debug.png` overlays,
 `--no-styles` skips steps 6–7 (`--textar-model-dir`, `--doctr-model-dir` change the weight folders),
 `--no-proofread` skips step 9 (`--proofread-model-dir` changes the language model folder),
-`--no-picture-recovery` skips the picture recovery of step 5.
+`--no-picture-recovery` skips the picture recovery of step 5, `--no-residual-text` the residual text,
+`--no-layout-review` the layout review after OCR.
 
 ## Usage
 

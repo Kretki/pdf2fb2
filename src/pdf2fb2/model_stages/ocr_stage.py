@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from pdf2fb2.fb2_output.text_markup import clean_ocr_text
+from pdf2fb2.fb2_output.text_markup import clean_ocr_text, normalize_ellipsis
 from pdf2fb2.model_stages.ocr_crop_writer import OcrCropWriter, PendingCrop
 from pdf2fb2.model_stages.ocr_text_cache import OcrTextCache, build_segment_key
 from pdf2fb2.progress.progress_contracts import StageProgress
@@ -44,7 +44,7 @@ class OcrBackendSettings:
 
 
 def apply_cached_texts(page_records: list[dict], text_cache: OcrTextCache) -> None:
-    """Copy cached OCR texts into the segments.
+    """Copy cached OCR texts into the segments, with typeset ellipses normalised.
 
     Args:
         page_records: Page records (segments mutated: ``text`` is set).
@@ -56,7 +56,8 @@ def apply_cached_texts(page_records: list[dict], text_cache: OcrTextCache) -> No
     for page_record in page_records:
         for page_segment in page_record["segments"]:
             if requires_ocr(page_segment["label"]):
-                page_segment["text"] = text_cache.lookup_text(build_segment_key(page_record, page_segment))
+                page_segment["text"] = normalize_ellipsis(
+                    text_cache.lookup_text(build_segment_key(page_record, page_segment)))
 
 
 class OcrProgressRelay:

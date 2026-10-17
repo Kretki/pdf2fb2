@@ -23,37 +23,19 @@ from pdf2fb2.interface.input_validation import (
     parse_server_url,
     parse_short_text,
 )
+from pdf2fb2.interface.pipeline_wiring import build_pipeline
 from pdf2fb2.interface.selftest_document import create_selftest_pdf
-from pdf2fb2.model_stages.layout_stage import LayoutStage
-from pdf2fb2.model_stages.marks_stage import MarksStage
-from pdf2fb2.model_stages.ocr_stage import OcrBackendSettings, OcrStage
-from pdf2fb2.model_stages.proofread_stage import ProofreadStage
-from pdf2fb2.model_stages.style_stage import StyleStage
-from pdf2fb2.pipeline.conversion_pipeline import ConversionPipeline, ConversionRequest
-from pdf2fb2.pipeline.handwriting_check import HandwritingCheck
-from pdf2fb2.pipeline.mark_rescan import MarkRescanner
-from pdf2fb2.pipeline.picture_recovery import PictureRecovery
-from pdf2fb2.progress.progress_contracts import ProgressDisplay
+from pdf2fb2.pipeline.conversion_pipeline import ConversionRequest
 from pdf2fb2.progress.terminal_progress import create_progress_display
 from pdf2fb2.project_paths import (
     DOCTR_DETECTOR_DIRECTORY,
     LAYOUT_MODEL_DIRECTORY,
     PROOFREAD_MODEL_DIRECTORY,
     QIANFAN_MODEL_DIRECTORY,
-    READERMARKS_CHECKPOINT_DIRECTORY,
     TEXTAR_MODEL_DIRECTORY,
 )
-from pdf2fb2.proofreading.flow_proofreader import LanguageModelProofreader
-from pdf2fb2.segments.glyph_measurement import OpenCvGlyphMeter
-from pdf2fb2.worker_runtime.worker_environment import (
-    LAYOUT_WORKER,
-    MARKS_WORKER,
-    OCR_WORKER,
-    PROOFREAD_WORKER,
-    STYLE_WORKER,
-)
-from pdf2fb2.worker_runtime.worker_launcher import SubprocessWorkerLauncher, WorkerFailedError
-from worker_protocol.ocr_job_schema import HTTP_BACKEND, MAX_PARALLEL_REQUESTS, TRANSFORMERS_BACKEND
+from pdf2fb2.worker_runtime.worker_launcher import WorkerFailedError
+from worker_protocol.ocr_job_schema import MAX_PARALLEL_REQUESTS
 
 FAILURE_EXIT_CODE = 1
 SELFTEST_PDF_NAME = "selftest.pdf"
@@ -73,6 +55,13 @@ def _add_model_arguments(argument_parser: argparse.ArgumentParser) -> None:
                                  "lettering that does not fit the book's font size, 0..1")
     argument_parser.add_argument("--no-picture-recovery", dest="skip_picture_recovery", action="store_true",
                                  help="keep lettering that does not fit the book's font size as text")
+    argument_parser.add_argument("--residual-threshold", dest="residual_threshold", type=parse_probability,
+                                 default=0.3, help="layout score threshold when pages with text left outside "
+                                 "every segment are segmented again, 0..1")
+    argument_parser.add_argument("--no-residual-text", dest="skip_residual_text", action="store_true",
+                                 help="do not look for text left outside every segment before OCR")
+    argument_parser.add_argument("--no-layout-review", dest="skip_layout_review", action="store_true",
+                                 help="keep the layout labels after OCR (no page-number and heading statistics)")
     argument_parser.add_argument("--layout-model-dir", dest="layout_model_directory", type=parse_existing_directory,
                                  default=LAYOUT_MODEL_DIRECTORY)
     argument_parser.add_argument("--qianfan-path", dest="qianfan_directory", type=parse_existing_directory,
@@ -148,75 +137,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
     _add_marks_arguments(argument_parser)
     _add_book_arguments(argument_parser)
     return argument_parser
-
-
-def build_ocr_settings(parsed_arguments: argparse.Namespace) -> OcrBackendSettings:
-    """Choose the OCR backend: HTTP server when ``--qianfan-url`` is given, else local weights.
-
-    Args:
-        parsed_arguments: Parsed command line.
-
-    Returns:
-        Settings for the OCR stage.
-    """
-    use_server = parsed_arguments.qianfan_url is not None
-    return OcrBackendSettings(
-        backend_name=HTTP_BACKEND if use_server else TRANSFORMERS_BACKEND,
-        model_directory=None if use_server else parsed_arguments.qianfan_directory,
-        device_name=parsed_arguments.device_name,
-        server_url=parsed_arguments.qianfan_url,
-        server_model=parsed_arguments.qianfan_model if use_server else None,
-        parallel_requests=parsed_arguments.parallel_requests,
-    )
-
-
-def build_picture_recovery(parsed_arguments: argparse.Namespace,
-                           worker_launcher: SubprocessWorkerLauncher) -> PictureRecovery | None:
-    """Wire the picture recovery with the OpenCV glyph meter and a low-threshold layout stage.
-
-    Args:
-        parsed_arguments: Parsed command line.
-        worker_launcher: Starts the layout worker.
-
-    Returns:
-        The picture recovery, or None with ``--no-picture-recovery``.
-    """
-    if parsed_arguments.skip_picture_recovery:
-        return None
-    proposal_stage = LayoutStage(worker_launcher, LAYOUT_WORKER, parsed_arguments.layout_model_directory,
-                                 parsed_arguments.device_name, parsed_arguments.picture_threshold)
-    return PictureRecovery(OpenCvGlyphMeter(), proposal_stage)
-
-
-def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: ProgressDisplay) -> ConversionPipeline:
-    """Wire the stages with the subprocess launcher, the worker venvs and the progress display.
-
-    Args:
-        parsed_arguments: Parsed command line.
-        progress_display: Shows the overall progress bar and the current step.
-
-    Returns:
-        Ready-to-run pipeline.
-    """
-    worker_launcher = SubprocessWorkerLauncher()
-    layout_stage = LayoutStage(worker_launcher, LAYOUT_WORKER, parsed_arguments.layout_model_directory,
-                               parsed_arguments.device_name, parsed_arguments.score_threshold)
-    ocr_stage = OcrStage(worker_launcher, OCR_WORKER, build_ocr_settings(parsed_arguments))
-    mark_rescanner = None
-    handwriting_check = None
-    if not parsed_arguments.keep_marks:
-        marks_stage = MarksStage(worker_launcher, MARKS_WORKER,
-                                 parsed_arguments.marks_model_directory or READERMARKS_CHECKPOINT_DIRECTORY,
-                                 parsed_arguments.device_name, parsed_arguments.debug_marks)
-        mark_rescanner = MarkRescanner(marks_stage, layout_stage)
-        handwriting_check = HandwritingCheck(marks_stage)
-    style_stage = None if parsed_arguments.skip_styles else StyleStage(
-        worker_launcher, STYLE_WORKER, parsed_arguments.textar_model_directory,
-        parsed_arguments.doctr_model_directory, parsed_arguments.device_name)
-    flow_checker = None if parsed_arguments.skip_proofread else LanguageModelProofreader(ProofreadStage(
-        worker_launcher, PROOFREAD_WORKER, parsed_arguments.proofread_model_directory, parsed_arguments.device_name))
-    return ConversionPipeline(layout_stage, ocr_stage, progress_display, mark_rescanner, style_stage, flow_checker,
-                              handwriting_check, build_picture_recovery(parsed_arguments, worker_launcher))
 
 
 def build_request(parsed_arguments: argparse.Namespace, pdf_path: Path) -> ConversionRequest:
