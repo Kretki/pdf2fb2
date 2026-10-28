@@ -2,7 +2,9 @@
 
 Every variant is ``context + [unit] + separator + continuation`` and is measured from the end of the
 unit (or of the context when the unit is dropped), so all variants of one test score exactly the
-same following words, including the separator that leads into them.
+same following words, including the separator that leads into them. In targeted jobs (no whole-document
+scoring) word and block tests add an ``own`` variant: the kept text measured from the start of the unit, so
+``own - keep`` is the unit's own log-probability in its context.
 """
 
 from dataclasses import dataclass
@@ -79,7 +81,7 @@ def separator_between(document_text: DocumentText, left_index: int, right_index:
 
 
 def word_check(document_text: DocumentText, span_index: int, context_characters: int,
-               continuation_words: int) -> CheckRequest | None:
+               continuation_words: int, include_own: bool = False) -> CheckRequest | None:
     """Test whether the words after a word read better without it.
 
     Args:
@@ -87,6 +89,7 @@ def word_check(document_text: DocumentText, span_index: int, context_characters:
         span_index: Tested word span.
         context_characters: Context length.
         continuation_words: Measured words after the unit.
+        include_own: Add the ``own`` variant (targeted jobs).
 
     Returns:
         The request, or None for the last word of the document.
@@ -103,13 +106,17 @@ def word_check(document_text: DocumentText, span_index: int, context_characters:
     kept_head = context_text + separator_before + word_text
     joined_separator = BLOCK_SEPARATOR if BLOCK_SEPARATOR in (separator_before, separator_after) else WORD_SEPARATOR
     joined_separator = joined_separator if context_text else ""
-    return CheckRequest("word", {"block": word_span.block_index, "word": word_span.word_index}, ("keep", "drop"),
-                        ((kept_head + separator_after + continuation_text, len(kept_head)),
-                         (context_text + joined_separator + continuation_text, len(context_text))))
+    kept_text = kept_head + separator_after + continuation_text
+    variant_names = ("keep", "drop", "own") if include_own else ("keep", "drop")
+    scored_variants = ((kept_text, len(kept_head)), (context_text + joined_separator + continuation_text,
+                                                     len(context_text)),
+                       (kept_text, len(context_text + separator_before)))
+    return CheckRequest("word", {"block": word_span.block_index, "word": word_span.word_index}, variant_names,
+                        scored_variants[:len(variant_names)])
 
 
 def block_check(document_text: DocumentText, block_index: int, context_characters: int,
-                continuation_words: int) -> CheckRequest | None:
+                continuation_words: int, include_own: bool = False) -> CheckRequest | None:
     """Test whether the text after a block reads better without it, separately or merged.
 
     Args:
@@ -117,6 +124,7 @@ def block_check(document_text: DocumentText, block_index: int, context_character
         block_index: Tested block.
         context_characters: Context length.
         continuation_words: Measured words after the block.
+        include_own: Add the ``own`` variant (targeted jobs).
 
     Returns:
         The request, or None for empty blocks and the last block.
@@ -136,10 +144,13 @@ def block_check(document_text: DocumentText, block_index: int, context_character
         continuation_from(document_text, next_span, continuation_words)
     following_text = continuation_text.lstrip()
     merged_separator = WORD_SEPARATOR if context_text else ""
-    return CheckRequest("block", {"block": block_index}, ("keep", "drop_separate", "drop_merged"),
-                        ((kept_head + continuation_text, len(kept_head)),
-                         (context_text + lead_separator + following_text, len(context_text)),
-                         (context_text + merged_separator + following_text, len(context_text))))
+    variant_names = ("keep", "drop_separate", "drop_merged", "own") if include_own \
+        else ("keep", "drop_separate", "drop_merged")
+    scored_variants = ((kept_head + continuation_text, len(kept_head)),
+                       (context_text + lead_separator + following_text, len(context_text)),
+                       (context_text + merged_separator + following_text, len(context_text)),
+                       (kept_head + continuation_text, len(context_text + lead_separator)))
+    return CheckRequest("block", {"block": block_index}, variant_names, scored_variants[:len(variant_names)])
 
 
 def break_check(document_text: DocumentText, block_index: int, context_characters: int,

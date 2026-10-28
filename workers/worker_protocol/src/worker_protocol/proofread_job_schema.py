@@ -8,15 +8,24 @@ gives every token a log-probability from its left context, and runs deletion tes
 * ``break`` tests for the paragraph breaks listed in ``break_checks`` (block index of the break's
   second block: is it one paragraph wrongly split in two?);
 * ``rewrite`` tests for the word spans listed in ``rewrite_checks`` (which spelling reads best, see
-  ``worker_protocol.rewrite_checks``).
+  ``worker_protocol.rewrite_checks``);
+* ``respell`` tests for at most ``max_respell_checks`` of the same low-probability words: up to
+  ``respell_candidates`` spellings within two edits (OCR confusions such as с/е, rn/m, or words of the book
+  itself) are scored like rewrite spellings.
 
 A test compares the log-probability of the text that follows the unit with and without it.
+
+When ``target_words`` is given (targeted job), the whole text is not scored: only the listed words (flagged by
+the token verifier) get ``word`` and ``respell`` tests, word and block tests carry an ``own`` variant (the
+unit's own log-probability is ``own - keep``), and the ``tokens`` lists of the result are empty.
 
 Result: JSON document ``{"blocks": [{"words": [{"tokens": [[text, logprob], ...],
 "min_logprob": float, "mean_logprob": float}]}], "word_checks": [{"block": int, "word": int,
 "keep": float, "drop": float}], "block_checks": [{"block": int, "keep": float, "drop_separate":
 float, "drop_merged": float}], "break_checks": [{"block": int, "keep": float, "merged": float}],
-"rewrite_checks": [{"block": int, "word": int, "count": int, <variant name>: float, ...}]}``.
+"rewrite_checks": [{"block": int, "word": int, "count": int, <variant name>: float, ...}],
+"respell_checks": [{"block": int, "word": int, "spellings": {name: text}, "costs": {name: float},
+"kept": float, <name>: float, ...}]}``.
 """
 
 from dataclasses import dataclass
@@ -24,20 +33,20 @@ from pathlib import Path
 
 from worker_protocol.field_validation import (
     require_absolute_directory,
-    require_integer,
     require_list,
-    require_number,
     require_string,
     validate_device_name,
 )
 from worker_protocol.job_schema import checked_relative_path
 from worker_protocol.path_safety import resolve_inside_directory
+from worker_protocol.proofread_settings import ProofreadSettings  # re-exported for the job's users
 from worker_protocol.rewrite_checks import RewriteCheck, validate_rewrite_checks
 
 BLOCK_KINDS = frozenset({"p", "heading", "caption"})
 MAX_BLOCKS = 500_000
 MAX_WORDS_PER_BLOCK = 50_000
 MAX_WORD_LENGTH = 1024
+MAX_TARGET_WORDS = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -82,6 +91,31 @@ def validate_text_block(block_entry: object) -> TextBlock:
     return TextBlock(block_kind=block_entry["kind"], block_words=tuple(word_entries))
 
 
+def validate_target_words(job_payload: dict, block_word_counts: list[int]) -> tuple[tuple[int, int], ...] | None:
+    """Read the optional list of targeted words.
+
+    Args:
+        job_payload: Decoded JSON object.
+        block_word_counts: Number of words of every block.
+
+    Returns:
+        ``(block, word)`` pairs, or None when the job is not targeted.
+
+    Raises:
+        ValueError: If an entry is not a ``[block, word]`` pair inside the blocks.
+    """
+    if job_payload.get("target_words") is None:
+        return None
+    target_entries = require_list(job_payload, "target_words", MAX_TARGET_WORDS)
+    if not all(isinstance(target_entry, list) and len(target_entry) == 2
+               and all(isinstance(index_value, int) and not isinstance(index_value, bool)
+                       for index_value in target_entry)
+               and 0 <= target_entry[0] < len(block_word_counts)
+               and 0 <= target_entry[1] < block_word_counts[target_entry[0]] for target_entry in target_entries):
+        raise ValueError("Field 'target_words' must hold [block, word] pairs inside the blocks.")
+    return tuple((target_entry[0], target_entry[1]) for target_entry in target_entries)
+
+
 def validate_block_indexes(job_payload: dict, field_name: str, block_count: int) -> tuple[int, ...]:
     """Read a list of block indexes.
 
@@ -104,52 +138,6 @@ def validate_block_indexes(job_payload: dict, field_name: str, block_count: int)
 
 
 @dataclass(frozen=True)
-class ProofreadSettings:
-    """Tunable limits of the analysis.
-
-    Attributes:
-        candidate_logprob: A word is tested when its least probable token is below this (natural log).
-        context_characters: Characters of preceding text given to every deletion test.
-        continuation_words: Words after the tested unit whose probability is compared.
-        max_word_checks: Upper bound of word tests (the least probable words are tested first).
-    """
-
-    candidate_logprob: float
-    context_characters: int
-    continuation_words: int
-    max_word_checks: int
-
-    def to_payload(self) -> dict:
-        """Serialise the settings.
-
-        Returns:
-            JSON-compatible dictionary.
-        """
-        return {"candidate_logprob": self.candidate_logprob, "context_characters": self.context_characters,
-                "continuation_words": self.continuation_words, "max_word_checks": self.max_word_checks}
-
-    @classmethod
-    def from_payload(cls, settings_payload: object) -> "ProofreadSettings":
-        """Decode and bound the settings.
-
-        Args:
-            settings_payload: Decoded JSON value.
-
-        Returns:
-            The validated settings.
-
-        Raises:
-            ValueError: If a value is missing or out of range.
-        """
-        if not isinstance(settings_payload, dict):
-            raise ValueError("Field 'settings' must be an object.")
-        return cls(candidate_logprob=require_number(settings_payload, "candidate_logprob", -100.0, 0.0),
-                   context_characters=require_integer(settings_payload, "context_characters", 64, 20_000),
-                   continuation_words=require_integer(settings_payload, "continuation_words", 1, 128),
-                   max_word_checks=require_integer(settings_payload, "max_word_checks", 0, 1_000_000))
-
-
-@dataclass(frozen=True)
 class ProofreadJob:
     """Request to score the book text and run deletion tests.
 
@@ -167,6 +155,7 @@ class ProofreadJob:
         proofread_settings: Analysis limits.
         result_file: Relative path of the JSON result document.
         rewrite_checks: Word spans whose spellings are compared.
+        target_words: ``(block, word)`` pairs flagged by the token verifier; None scores the whole text.
     """
 
     work_directory: Path
@@ -178,6 +167,7 @@ class ProofreadJob:
     proofread_settings: ProofreadSettings
     result_file: str
     rewrite_checks: tuple[RewriteCheck, ...] = ()
+    target_words: tuple[tuple[int, int], ...] | None = None
 
     def to_payload(self) -> dict:
         """Serialise the job to a JSON-compatible object.
@@ -192,7 +182,9 @@ class ProofreadJob:
                 "device_name": self.device_name, "blocks": [text_block.to_payload() for text_block in self.text_blocks],
                 "block_checks": list(self.block_checks), "break_checks": list(self.break_checks),
                 "settings": self.proofread_settings.to_payload(), "result_file": self.result_file,
-                "rewrite_checks": [rewrite_check.to_payload() for rewrite_check in self.rewrite_checks]}
+                "rewrite_checks": [rewrite_check.to_payload() for rewrite_check in self.rewrite_checks],
+                "target_words": None if self.target_words is None else [list(target_word)
+                                                                        for target_word in self.target_words]}
 
     @classmethod
     def from_payload(cls, job_payload: dict) -> "ProofreadJob":
@@ -225,6 +217,8 @@ class ProofreadJob:
             result_file=checked_relative_path(work_directory, require_string(job_payload, "result_file")),
             rewrite_checks=validate_rewrite_checks(job_payload, [len(text_block.block_words)
                                                                  for text_block in text_blocks]),
+            target_words=validate_target_words(job_payload, [len(text_block.block_words)
+                                                             for text_block in text_blocks]),
         )
 
     def resolve_inside(self, relative_path: str) -> Path:

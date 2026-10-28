@@ -11,7 +11,7 @@ from collections.abc import Callable
 from typing import TextIO
 
 from pdf2fb2.progress.progress_contracts import ProgressDisplay
-from pdf2fb2.progress.progress_formatting import compose_progress_line, fit_to_width
+from pdf2fb2.progress.progress_formatting import compose_progress_line, fit_to_width, format_duration
 
 CURSOR_UP = "\x1b[1A"
 CLEAR_LINE = "\x1b[2K"
@@ -55,14 +55,17 @@ class TerminalProgressDisplay:
         self._last_drawn_at: float | None = None
         self._overall_fraction = 0.0
         self._status_text = "starting"
+        self._remaining_seconds: float | None = None
+        self._remaining_measured_at = self._started_at
         self._lines_drawn = False
 
-    def show_progress(self, overall_fraction: float, status_text: str) -> None:
+    def show_progress(self, overall_fraction: float, status_text: str, remaining_seconds: float | None = None) -> None:
         """Store the new state and redraw at most ten times per second.
 
         Args:
             overall_fraction: Completed share, 0..1.
             status_text: Current step description.
+            remaining_seconds: Estimated time left (None: extrapolate from the fraction).
 
         Returns:
             None.
@@ -70,6 +73,8 @@ class TerminalProgressDisplay:
         self._overall_fraction = overall_fraction
         self._status_text = status_text
         current_time = self._clock_function()
+        self._remaining_seconds = remaining_seconds
+        self._remaining_measured_at = current_time
         if self._last_drawn_at is None or current_time - self._last_drawn_at >= REDRAW_INTERVAL_SECONDS:
             self._redraw_lines(current_time)
 
@@ -94,10 +99,24 @@ class TerminalProgressDisplay:
         """
         terminal_columns = self._columns_function()
         progress_line = compose_progress_line(self._title_text, self._overall_fraction,
-                                              self._clock_function() - self._started_at, terminal_columns)
+                                              self._clock_function() - self._started_at, terminal_columns,
+                                              self._current_remaining(self._clock_function()))
         self._output_stream.write(self._return_to_first_line() + CLEAR_LINE + progress_line + "\n" + CLEAR_LINE)
         self._output_stream.flush()
         self._lines_drawn = False
+
+    def _current_remaining(self, current_time: float) -> float | None:
+        """Time left, counted down since the last estimate.
+
+        Args:
+            current_time: Clock value of the redraw.
+
+        Returns:
+            Seconds left (>= 0), or None without an estimate.
+        """
+        if self._remaining_seconds is None:
+            return None
+        return max(self._remaining_seconds - (current_time - self._remaining_measured_at), 0.0)
 
     def _return_to_first_line(self) -> str:
         """Control sequence that moves the cursor back to the bar line.
@@ -118,7 +137,8 @@ class TerminalProgressDisplay:
         """
         terminal_columns = self._columns_function()
         progress_line = compose_progress_line(self._title_text, self._overall_fraction,
-                                              current_time - self._started_at, terminal_columns)
+                                              current_time - self._started_at, terminal_columns,
+                                              self._current_remaining(current_time))
         status_line = fit_to_width("  " + self._status_text, terminal_columns)
         self._output_stream.write(self._return_to_first_line() + CLEAR_LINE + progress_line + "\n"
                                   + CLEAR_LINE + status_line)
@@ -143,19 +163,21 @@ class PlainProgressDisplay:
         self._output_stream = output_stream
         self._next_report_fraction = PLAIN_REPORT_STEP
 
-    def show_progress(self, overall_fraction: float, status_text: str) -> None:
+    def show_progress(self, overall_fraction: float, status_text: str, remaining_seconds: float | None = None) -> None:
         """Print a line each time progress crosses the next 10% step.
 
         Args:
             overall_fraction: Completed share, 0..1.
             status_text: Current step description.
+            remaining_seconds: Estimated time left in seconds (None: unknown).
 
         Returns:
             None.
         """
         if overall_fraction + FRACTION_TOLERANCE < self._next_report_fraction:
             return
-        print(f"{int(overall_fraction * 100):3d}% {status_text}", file=self._output_stream, flush=True)
+        remaining_text = "" if remaining_seconds is None else f" (about {format_duration(remaining_seconds)} left)"
+        print(f"{int(overall_fraction * 100):3d}% {status_text}{remaining_text}", file=self._output_stream, flush=True)
         while self._next_report_fraction <= overall_fraction + FRACTION_TOLERANCE:
             self._next_report_fraction += PLAIN_REPORT_STEP
 
@@ -185,12 +207,13 @@ class SilentProgressDisplay:
         For tests and embedding the pipeline in other programs.
     """
 
-    def show_progress(self, overall_fraction: float, status_text: str) -> None:
+    def show_progress(self, overall_fraction: float, status_text: str, remaining_seconds: float | None = None) -> None:
         """Ignore progress.
 
         Args:
             overall_fraction: Ignored.
             status_text: Ignored.
+            remaining_seconds: Ignored.
 
         Returns:
             None.

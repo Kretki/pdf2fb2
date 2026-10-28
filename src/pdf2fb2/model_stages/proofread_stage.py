@@ -15,7 +15,7 @@ PROOFREAD_RESULT_FILE = "proofread_result.json"
 CHECK_FIELDS = {"word_checks": ("keep", "drop"), "block_checks": ("keep", "drop_separate", "drop_merged"),
                 "break_checks": ("keep", "merged")}
 DEFAULT_SETTINGS = ProofreadSettings(candidate_logprob=-9.0, context_characters=1200, continuation_words=12,
-                                     max_word_checks=50_000)
+                                     max_word_checks=50_000, max_respell_checks=20_000, respell_candidates=6)
 # Share of the stage given to scoring the whole text; the deletion tests take the rest.
 SCORING_SHARE = 0.3
 PROGRESS_STEPS = 1000
@@ -78,6 +78,29 @@ def matches_rewrite(rewrite_entry: object, rewrite_check: RewriteCheck) -> bool:
                     for variant_name, _ in rewrite_check.variant_texts))
 
 
+def matches_respell(respell_entry: object, text_blocks: tuple[TextBlock, ...]) -> bool:
+    """Tell whether a respelling result is well formed.
+
+    Args:
+        respell_entry: Result entry.
+        text_blocks: Blocks of the job.
+
+    Returns:
+        True when the word exists and the spelling read and every candidate have a numeric score.
+    """
+    if not isinstance(respell_entry, dict) or not isinstance(respell_entry.get("spellings"), dict) \
+            or not isinstance(respell_entry.get("costs"), dict):
+        return False
+    block_index, word_index = respell_entry.get("block"), respell_entry.get("word")
+    if not (isinstance(block_index, int) and 0 <= block_index < len(text_blocks) and isinstance(word_index, int)
+            and 0 <= word_index < len(text_blocks[block_index].block_words)):
+        return False
+    return all(isinstance(respell_entry.get(variant_name), (int, float))
+               for variant_name in ("kept", *respell_entry["spellings"])) and all(
+        isinstance(spelling_text, str) and spelling_text.strip()
+        for spelling_text in respell_entry["spellings"].values())
+
+
 def validate_result(worker_result: object, text_blocks: tuple[TextBlock, ...],
                     rewrite_checks: tuple[RewriteCheck, ...] = ()) -> dict:
     """Check that the worker result matches the job.
@@ -111,6 +134,10 @@ def validate_result(worker_result: object, text_blocks: tuple[TextBlock, ...],
             matches_rewrite(rewrite_entry, rewrite_check)
             for rewrite_entry, rewrite_check in zip(rewrite_entries, rewrite_checks, strict=True)):
         raise WorkerFailedError("Proofread worker returned malformed rewrite_checks.")
+    respell_entries = worker_result.get("respell_checks", [])
+    if not isinstance(respell_entries, list) or not all(matches_respell(respell_entry, text_blocks)
+                                                        for respell_entry in respell_entries):
+        raise WorkerFailedError("Proofread worker returned malformed respell_checks.")
     return worker_result
 
 
@@ -138,8 +165,8 @@ class ProofreadStage:
 
     def score_blocks(self, block_words: list[tuple[str, tuple[str, ...]]], block_checks: list[int],
                      break_checks: list[int], rewrite_checks: list[RewriteCheck], work_directory: Path,
-                     stage_progress: StageProgress) -> dict:
-        """Score every token and run the deletion and rewrite tests.
+                     stage_progress: StageProgress, target_words: list[tuple[int, int]] | None = None) -> dict:
+        """Score the text and run the deletion, rewrite and respelling tests.
 
         Args:
             block_words: ``(kind, plain words)`` per block in reading order.
@@ -148,6 +175,8 @@ class ProofreadStage:
             rewrite_checks: Word spans whose spellings are compared.
             work_directory: Output directory for the job and result files.
             stage_progress: Receives proofreading progress.
+            target_words: ``(block, word)`` pairs flagged by the token verifier: only they are word-tested and
+                the whole text is not scored. None scores every token (full mode).
 
         Returns:
             Validated worker result (see ``worker_protocol.proofread_job_schema``).
@@ -161,7 +190,8 @@ class ProofreadStage:
             work_directory=work_directory.resolve(), model_directory=self._model_directory.resolve(),
             device_name=self._device_name, text_blocks=text_blocks, block_checks=tuple(block_checks),
             break_checks=tuple(break_checks), proofread_settings=DEFAULT_SETTINGS, result_file=PROOFREAD_RESULT_FILE,
-            rewrite_checks=tuple(rewrite_checks))
+            rewrite_checks=tuple(rewrite_checks),
+            target_words=None if target_words is None else tuple(target_words))
         job_file = work_directory / PROOFREAD_JOB_FILE
         write_json_document(job_file, proofread_job.to_payload())
         stage_progress.advance_stage(0, PROGRESS_STEPS, "starting proofread worker")

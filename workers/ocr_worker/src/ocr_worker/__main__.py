@@ -5,7 +5,8 @@ Usage:
 
 Reads an ``OcrJobSpec`` (see ``worker_protocol.ocr_job_schema``), reads every crop with
 Qianfan-OCR and appends one JSON line per crop to the job's result file.
-Exit code 0 when all crops were read, 1 when some failed, 2 for an invalid job file.
+Exit code 0 when all crops were read, 1 when some failed, 2 for an invalid job file,
+3 when the engine became unusable mid-job (e.g. the GPU refuses every allocation).
 """
 
 import argparse
@@ -13,6 +14,7 @@ import sys
 from pathlib import Path
 
 from ocr_worker.engine_factory import create_ocr_engine
+from ocr_worker.engine_protocol import EngineUnavailableError
 from ocr_worker.job_execution import run_ocr_job
 from worker_protocol.json_files import read_json_document
 from worker_protocol.ocr_job_schema import OcrJobSpec
@@ -20,6 +22,7 @@ from worker_protocol.progress_events import MODEL_LOADING_EVENT, emit_progress_e
 
 PARTIAL_FAILURE_EXIT_CODE = 1
 INVALID_JOB_EXIT_CODE = 2
+ENGINE_UNAVAILABLE_EXIT_CODE = 3
 
 
 def parse_arguments(argument_list: list[str] | None) -> argparse.Namespace:
@@ -50,7 +53,8 @@ def run_worker(argument_list: list[str] | None = None) -> int:
 
     Returns:
         Process exit code: 0 all crops read, 1 some crops failed (see result file),
-        2 invalid job file. Model loading errors propagate as exceptions.
+        2 invalid job file, 3 engine unusable (results written so far are kept).
+        Model loading errors propagate as exceptions.
     """
     parsed_arguments = parse_arguments(argument_list)
     try:
@@ -59,7 +63,11 @@ def run_worker(argument_list: list[str] | None = None) -> int:
         print(f"ocr_worker: invalid job file: {job_error}", file=sys.stderr)
         return INVALID_JOB_EXIT_CODE
     emit_progress_event(MODEL_LOADING_EVENT)
-    failure_count = run_ocr_job(ocr_request, create_ocr_engine(ocr_request))
+    try:
+        failure_count = run_ocr_job(ocr_request, create_ocr_engine(ocr_request))
+    except EngineUnavailableError as engine_error:
+        print(f"ocr_worker: stopping the job: {engine_error}", file=sys.stderr)
+        return ENGINE_UNAVAILABLE_EXIT_CODE
     return PARTIAL_FAILURE_EXIT_CODE if failure_count else 0
 
 

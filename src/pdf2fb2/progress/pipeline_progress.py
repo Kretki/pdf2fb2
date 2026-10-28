@@ -1,84 +1,103 @@
-"""Maps per-stage progress onto one overall progress value."""
+"""Turns per-stage progress into one overall progress value and a time-left estimate.
 
-from pdf2fb2.progress.progress_contracts import ProgressDisplay
+The overall fraction is time-based: elapsed / (elapsed + estimated time left), where the time left comes from the
+stored speeds of this machine (see ``timekeeping``). A slow final stage (proofreading) therefore keeps a long estimate
+instead of looking almost done.
+"""
 
-RENDERING_STAGE = "rendering"
-CLEANING_STAGE = "cleaning"
-HANDWRITING_STAGE = "handwriting"
-PICTURE_STAGE = "pictures"
-RESIDUAL_STAGE = "residual"
-REVIEW_STAGE = "review"
-SEGMENT_REVIEW_STAGE = "segment_review"
-SEGMENTATION_STAGE = "segmentation"
-DRAWING_STAGE = "drawing"
-RECOGNITION_STAGE = "recognition"
-STYLING_STAGE = "styling"
-PROOFREADING_STAGE = "proofreading"
-RESCAN_SEGMENTATION_STAGE = "rescan_segmentation"
-ASSEMBLING_STAGE = "assembling"
+import time
+from collections.abc import Callable
 
-# Rough share of the run time of each stage; OCR dominates on real books.
-STAGE_WEIGHTS = {RENDERING_STAGE: 6.0, SEGMENTATION_STAGE: 22.0, RECOGNITION_STAGE: 65.0, CLEANING_STAGE: 6.0,
-                 RESCAN_SEGMENTATION_STAGE: 4.0, HANDWRITING_STAGE: 2.0, PICTURE_STAGE: 2.0, RESIDUAL_STAGE: 2.0,
-                 REVIEW_STAGE: 1.0, SEGMENT_REVIEW_STAGE: 0.5, STYLING_STAGE: 4.0, PROOFREADING_STAGE: 15.0,
-                 DRAWING_STAGE: 3.0, ASSEMBLING_STAGE: 4.0}
+from pdf2fb2.progress.progress_contracts import ProgressDisplay, RunTimer
+from pdf2fb2.progress.stage_names import (  # noqa: F401 - re-exported for the stages
+    ASSEMBLING_STAGE,
+    CLEANING_STAGE,
+    DRAWING_STAGE,
+    HANDWRITING_STAGE,
+    PICTURE_STAGE,
+    PROOFREADING_STAGE,
+    RECOGNITION_STAGE,
+    RENDERING_STAGE,
+    RESCAN_SEGMENTATION_STAGE,
+    RESIDUAL_STAGE,
+    REVIEW_STAGE,
+    SEGMENT_REVIEW_STAGE,
+    SEGMENTATION_STAGE,
+    STYLING_STAGE,
+    VERIFICATION_STAGE,
+)
 
 
 class PipelineProgress:
-    """Splits the overall bar into weighted stage windows and keeps it monotonic.
+    """Keeps the overall bar monotonic and forwards the time-left estimate to the display.
 
     Usage:
-        Create per conversion with the active stages, hand ``stage_tracker(name)``
-        to each stage, and call ``close_progress`` at the end.
+        Create per conversion with the active stages and a run timer, hand ``stage_tracker(name)`` to each stage,
+        report workload sizes with ``revise_workload`` and call ``close_progress`` at the end.
     """
 
-    def __init__(self, progress_display: ProgressDisplay, stage_names: list[str]) -> None:
-        """Compute the window of every active stage.
+    def __init__(self, progress_display: ProgressDisplay, stage_names: list[str], run_timer: RunTimer,
+                 clock_function: Callable[[], float] = time.monotonic) -> None:
+        """Bind the display and the timer.
 
         Args:
             progress_display: Display that renders the overall progress.
-            stage_names: Active stages in execution order (keys of ``STAGE_WEIGHTS``).
-
-        Raises:
-            KeyError: If a stage name is unknown.
+            stage_names: Active stages in execution order.
+            run_timer: Estimates the time left from the stage reports.
+            clock_function: Monotonic clock in seconds (injectable for tests).
         """
         self._progress_display = progress_display
-        weight_total = sum(STAGE_WEIGHTS[stage_name] for stage_name in stage_names) or 1.0
-        self._stage_windows: dict[str, tuple[float, float]] = {}
-        window_start = 0.0
-        for stage_name in stage_names:
-            window_width = STAGE_WEIGHTS[stage_name] / weight_total
-            self._stage_windows[stage_name] = (window_start, window_width)
-            window_start += window_width
+        self._stage_names = frozenset(stage_names)
+        self._run_timer = run_timer
+        self._clock_function = clock_function
+        self._started_at = clock_function()
         self._shown_fraction = 0.0
 
-    def stage_tracker(self, stage_name: str) -> "WeightedStageProgress":
+    def stage_tracker(self, stage_name: str) -> "TimedStageProgress":
         """Return the progress sink of one stage.
 
         Args:
             stage_name: Active stage name given to the constructor.
 
         Returns:
-            Tracker that maps the stage's units into its window.
+            Tracker that reports the stage's units to the timer.
 
         Raises:
             KeyError: If the stage is not active.
         """
-        window_start, window_width = self._stage_windows[stage_name]
-        return WeightedStageProgress(self, window_start, window_width)
+        if stage_name not in self._stage_names:
+            raise KeyError(stage_name)
+        return TimedStageProgress(self, stage_name)
 
-    def show_fraction(self, overall_fraction: float, status_text: str) -> None:
-        """Forward progress to the display, never moving the bar backwards.
+    def revise_workload(self, **workload_sizes: int) -> None:
+        """Forward workload sizes that became known to the timer.
 
         Args:
-            overall_fraction: Overall completed share, 0..1.
+            **workload_sizes: ``page_count``, ``text_page_count``, ``token_count`` or ``inspected_token_count``.
+
+        Returns:
+            None.
+        """
+        self._run_timer.revise_workload(**workload_sizes)
+
+    def show_stage_fraction(self, stage_name: str, stage_fraction: float, status_text: str) -> None:
+        """Record a stage report and redraw the overall progress, never moving the bar backwards.
+
+        Args:
+            stage_name: Reporting stage.
+            stage_fraction: Its completed share, 0..1.
             status_text: Current step description.
 
         Returns:
             None.
         """
+        self._run_timer.record_report(stage_name, stage_fraction)
+        remaining_seconds = self._run_timer.remaining_seconds()
+        elapsed_seconds = self._clock_function() - self._started_at
+        run_seconds = elapsed_seconds + remaining_seconds
+        overall_fraction = elapsed_seconds / run_seconds if run_seconds > 0 else 0.0
         self._shown_fraction = max(self._shown_fraction, min(overall_fraction, 1.0))
-        self._progress_display.show_progress(self._shown_fraction, status_text)
+        self._progress_display.show_progress(self._shown_fraction, status_text, remaining_seconds)
 
     def show_message(self, message_text: str) -> None:
         """Forward a persistent message to the display.
@@ -92,7 +111,7 @@ class PipelineProgress:
         self._progress_display.show_message(message_text)
 
     def close_progress(self, finished: bool) -> None:
-        """Fill the bar (on success) and close the display.
+        """Store the measured speeds, fill the bar (on success) and close the display.
 
         Args:
             finished: True when the conversion completed, False after an error.
@@ -100,29 +119,32 @@ class PipelineProgress:
         Returns:
             None.
         """
+        try:
+            self._run_timer.learn_speeds()
+        except OSError as metrics_error:
+            self.show_message(f"pdf2fb2: speed metrics not saved: {metrics_error}")
         if finished:
-            self.show_fraction(1.0, "done")
+            self._shown_fraction = 1.0
+            self._progress_display.show_progress(1.0, "done", 0.0)
         self._progress_display.close_display()
 
 
-class WeightedStageProgress:
-    """``StageProgress`` that maps stage units into the stage's window of the overall bar.
+class TimedStageProgress:
+    """``StageProgress`` of one stage: reports its share to the pipeline progress.
 
     Usage:
         Obtained from ``PipelineProgress.stage_tracker``.
     """
 
-    def __init__(self, pipeline_progress: PipelineProgress, window_start: float, window_width: float) -> None:
-        """Bind the tracker to its window.
+    def __init__(self, pipeline_progress: PipelineProgress, stage_name: str) -> None:
+        """Bind the tracker to its stage.
 
         Args:
             pipeline_progress: Owner that renders the overall value.
-            window_start: Overall fraction where the stage starts, 0..1.
-            window_width: Overall fraction covered by the stage, 0..1.
+            stage_name: Stage this tracker reports for.
         """
         self._pipeline_progress = pipeline_progress
-        self._window_start = window_start
-        self._window_width = window_width
+        self._stage_name = stage_name
 
     def advance_stage(self, completed_units: int, total_units: int, status_text: str) -> None:
         """Report stage progress.
@@ -137,7 +159,7 @@ class WeightedStageProgress:
         """
         unit_count = max(total_units, 1)
         stage_fraction = min(max(completed_units, 0), unit_count) / unit_count
-        self._pipeline_progress.show_fraction(self._window_start + self._window_width * stage_fraction, status_text)
+        self._pipeline_progress.show_stage_fraction(self._stage_name, stage_fraction, status_text)
 
     def report_message(self, message_text: str) -> None:
         """Show a persistent message.

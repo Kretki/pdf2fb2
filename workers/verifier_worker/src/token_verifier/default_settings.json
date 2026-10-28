@@ -1,0 +1,31 @@
+{
+  "paths": {
+    "base_model": "models/xlm-roberta-base",
+    "output_model": "models/token_verifier",
+    "data_directory": "benchmark_data",
+    "reports_directory": "benchmark_data/verifier_reports"
+  },
+  "synthesis": {
+    "examples_per_chunk": 3,
+    "misread_rate": 0.06,
+    "insert_rate": 0.3,
+    "max_insert_units": 8,
+    "random_seed": 1234
+  },
+  "training": {
+    "device_name": "cuda:0",
+    "max_tokens": 256,
+    "window_units": 96,
+    "batch_size": 16,
+    "gradient_accumulation": 2,
+    "learning_rate": 3e-05,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.06,
+    "epoch_count": 4,
+    "class_weights": [1.0, 3.0, 3.0],
+    "real_repeat": 3,
+    "language_balance_cap": 8,
+    "mixed_precision": true,
+    "random_seed": 1234
+  }
+}

@@ -6,6 +6,7 @@ Usage:
     uv run pdf2fb2 --batch                            # every book under input/ -> output/<sub-folders>/<stem>/
     uv run pdf2fb2 book.pdf --lang ja,en,la           # several languages, main first (or --lang auto)
     uv run pdf2fb2 --selftest
+    uv run pdf2fb2 book.pdf --yes                     # print the time estimate, start without waiting for Enter
     # faster OCR: serve Qianfan-OCR with vLLM and point the OCR worker at it
     uv run pdf2fb2 book.pdf --qianfan-url http://localhost:8000/v1 --workers 8
 """
@@ -30,6 +31,7 @@ from pdf2fb2.interface.input_validation import (
     parse_short_text,
 )
 from pdf2fb2.interface.pipeline_wiring import build_pipeline, build_source_registry
+from pdf2fb2.interface.run_planning import confirm_book_jobs
 from pdf2fb2.interface.selftest_document import create_selftest_pdf
 from pdf2fb2.pipeline.conversion_pipeline import ConversionRequest
 from pdf2fb2.progress.terminal_progress import create_progress_display
@@ -39,12 +41,14 @@ from pdf2fb2.project_paths import (
     PROOFREAD_MODEL_DIRECTORY,
     QIANFAN_MODEL_DIRECTORY,
     TEXTAR_MODEL_DIRECTORY,
+    VERIFIER_MODEL_DIRECTORY,
 )
 from pdf2fb2.text_languages.language_profiles import resolve_book_languages
 from worker_protocol.ocr_job_schema import MAX_PARALLEL_REQUESTS
 
 FAILURE_EXIT_CODE = 1
 SUCCESS_EXIT_CODE = 0
+ABORTED_EXIT_CODE = 130
 SELFTEST_PDF_NAME = "selftest.pdf"
 SELFTEST_DIRECTORY = "selftest"
 DEFAULT_INPUT_DIRECTORY = Path("input")
@@ -107,6 +111,13 @@ def _add_marks_arguments(argument_parser: argparse.ArgumentParser) -> None:
     argument_parser.add_argument("--proofread-model-dir", dest="proofread_model_directory",
                                  type=parse_existing_directory, default=PROOFREAD_MODEL_DIRECTORY,
                                  help="local language model used for proofreading")
+    argument_parser.add_argument("--no-verify", dest="skip_verify", action="store_true",
+                                 help="skip the token verifier and its OCR re-reads")
+    argument_parser.add_argument("--verify-model-dir", dest="verify_model_directory", type=parse_safe_path,
+                                 default=VERIFIER_MODEL_DIRECTORY,
+                                 help="fine-tuned token verifier (skipped when it has no config.json)")
+    argument_parser.add_argument("--full-proofread", dest="full_proofread", action="store_true",
+                                 help="let Qwen3.5 score the whole text even when the token verifier is available")
 
 
 def _add_book_arguments(argument_parser: argparse.ArgumentParser) -> None:
@@ -152,6 +163,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
                                  help="skip drawing segmentation boxes")
     argument_parser.add_argument("--selftest", dest="run_selftest", action="store_true",
                                  help="generate a test PDF and convert it")
+    argument_parser.add_argument("--yes", dest="skip_confirmation", action="store_true",
+                                 help="start without waiting for Enter after the time estimate")
     _add_model_arguments(argument_parser)
     _add_marks_arguments(argument_parser)
     _add_book_arguments(argument_parser)
@@ -257,11 +270,14 @@ def run_command_line(argument_list: list[str] | None = None) -> int:
         argument_list: Arguments without the program name; None means ``sys.argv[1:]``.
 
     Returns:
-        Exit code: 0 success, 1 failed checks, a failed book or a worker failure.
+        Exit code: 0 success, 1 failed checks, a failed book or a worker failure, 130 aborted by the admin.
     """
     argument_parser = build_argument_parser()
     parsed_arguments = argument_parser.parse_args(argument_list)
     book_jobs = resolve_book_jobs(parsed_arguments, argument_parser)
+    if not confirm_book_jobs(parsed_arguments, book_jobs):
+        print("pdf2fb2: aborted", file=sys.stderr)
+        return ABORTED_EXIT_CODE
     convert_book = partial(convert_book_job, parsed_arguments)
     if parsed_arguments.batch_mode:
         return convert_books(book_jobs, convert_book)

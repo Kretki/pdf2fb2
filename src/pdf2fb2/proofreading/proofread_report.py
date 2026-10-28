@@ -19,12 +19,14 @@ def block_report(flow_block: FlowBlock, result_block: dict) -> dict:
 
     Returns:
         ``{"kind", "words": [{"word", "probability", "tokens": [[text, probability], ...]}]}``;
-        ``probability`` of a word is the product of its token probabilities.
+        ``probability`` of a word is the product of its token probabilities (None for words the language model
+        did not score: targeted jobs score only the words flagged by the token verifier).
     """
     word_reports = []
     for word_text, word_result in zip(flow_block.plain_words, result_block["words"], strict=True):
         word_logprob = sum(token_entry[1] for token_entry in word_result["tokens"])
-        word_reports.append({"word": word_text, "probability": round(math.exp(word_logprob), PROBABILITY_DIGITS),
+        word_probability = round(math.exp(word_logprob), PROBABILITY_DIGITS) if word_result["tokens"] else None
+        word_reports.append({"word": word_text, "probability": word_probability,
                              "tokens": [[token_entry[0], round(math.exp(token_entry[1]), PROBABILITY_DIGITS)]
                                         for token_entry in word_result["tokens"]]})
     return {"kind": flow_block.block_kind, "words": word_reports}
@@ -44,12 +46,14 @@ def write_proofread_report(report_path: Path, flow_blocks: list[FlowBlock], work
         flow_edits: Decided edits.
 
     Returns:
-        Summary counts (deleted words, deleted headings, deleted paragraphs, merged paragraphs, fixed hyphens).
+        Summary counts (deleted words, deleted headings, deleted paragraphs, merged paragraphs, fixed hyphens,
+        respelled words).
     """
     deleted_kinds = [flow_blocks[block_index].block_kind for block_index in flow_edits.deleted_blocks]
     edit_summary = {"deleted_words": len(flow_edits.deleted_words), "deleted_headings": deleted_kinds.count("heading"),
                     "deleted_paragraphs": deleted_kinds.count("p"), "merged_paragraphs": len(flow_edits.merged_blocks),
-                    "fixed_hyphens": len(flow_edits.hyphen_fixes)}
+                    "fixed_hyphens": len(flow_edits.hyphen_fixes),
+                    "respelled_words": len(flow_edits.word_respellings)}
     report_document = {"summary": edit_summary, "edits": list(flow_edits.decision_notes),
                        "blocks": [block_report(flow_block, result_block) for flow_block, result_block
                                   in zip(flow_blocks, worker_result["blocks"], strict=True)]}

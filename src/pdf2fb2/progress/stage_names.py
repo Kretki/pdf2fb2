@@ -1,0 +1,18 @@
+"""Names of the progress stages of a conversion, in no particular order."""
+
+RENDERING_STAGE = "rendering"
+CLEANING_STAGE = "cleaning"
+HANDWRITING_STAGE = "handwriting"
+PICTURE_STAGE = "pictures"
+RESIDUAL_STAGE = "residual"
+REVIEW_STAGE = "review"
+SEGMENT_REVIEW_STAGE = "segment_review"
+SEGMENTATION_STAGE = "segmentation"
+DRAWING_STAGE = "drawing"
+RECOGNITION_STAGE = "recognition"
+STYLING_STAGE = "styling"
+PROOFREADING_STAGE = "proofreading"
+VERIFICATION_STAGE = "verification"
+RESCAN_SEGMENTATION_STAGE = "rescan_segmentation"
+ASSEMBLING_STAGE = "assembling"
+

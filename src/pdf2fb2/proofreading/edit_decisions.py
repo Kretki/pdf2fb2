@@ -10,7 +10,8 @@ All tests compare the log-probability of the text that follows a unit with and w
   (running heads, strongest when it heads many pages) and a heading inside an unfinished
   sentence add evidence.
 
-Words split by a line-break hyphen get the spelling the model finds most probable (see ``hyphen_repair``).
+Words split by a line-break hyphen get the spelling the model finds most probable (see ``hyphen_repair``);
+misread low-probability words get a candidate spelling that reads clearly better (see ``word_respelling``).
 """
 
 import math
@@ -22,6 +23,7 @@ from pdf2fb2.fb2_output.text_markup import NOTE_TOKEN_PATTERN, SENTENCE_END_PATT
 from pdf2fb2.proofreading.check_selection import SHORT_BLOCK_WORDS
 from pdf2fb2.proofreading.flow_blocks import FlowBlock
 from pdf2fb2.proofreading.hyphen_repair import HyphenFix, decide_hyphen_fixes
+from pdf2fb2.proofreading.word_respelling import WordRespelling, decide_respellings
 
 NOISE_COST = math.log(60.0)  # nats per character of a random OCR string
 LETTER_PRIOR = -6.0          # a token made of letters is rarely noise
@@ -48,6 +50,7 @@ class FlowEdits:
         merged_blocks: Blocks joined to the previous paragraph.
         decision_notes: Human-readable reasons for the report.
         hyphen_fixes: Respelled hyphen breaks.
+        word_respellings: Misread words replaced by a better spelling.
     """
 
     deleted_words: frozenset[tuple[int, int]]
@@ -55,6 +58,7 @@ class FlowEdits:
     merged_blocks: frozenset[int]
     decision_notes: tuple[dict, ...]
     hyphen_fixes: tuple[HyphenFix, ...] = ()
+    word_respellings: tuple[WordRespelling, ...] = ()
 
 
 def own_logprob(result_blocks: list[dict], block_index: int, word_indexes: range) -> float:
@@ -70,6 +74,23 @@ def own_logprob(result_blocks: list[dict], block_index: int, word_indexes: range
     """
     return sum(token_entry[1] for word_index in word_indexes
                for token_entry in result_blocks[block_index]["words"][word_index]["tokens"])
+
+
+def unit_logprob(check_entry: dict, result_blocks: list[dict], block_index: int, word_indexes: range) -> float:
+    """Log-probability of a tested unit in its context.
+
+    Args:
+        check_entry: Word or block test result (targeted jobs carry ``own``).
+        result_blocks: ``blocks`` of the worker result (scored tokens in whole-text jobs).
+        block_index: Block of the unit.
+        word_indexes: Words of the unit.
+
+    Returns:
+        ``own - keep`` when the test has an ``own`` score, otherwise the sum of the unit's token log-probabilities.
+    """
+    if isinstance(check_entry.get("own"), (int, float)):
+        return check_entry["own"] - check_entry["keep"]
+    return own_logprob(result_blocks, block_index, word_indexes)
 
 
 def noise_log_odds(unit_text: str, continuation_gain: float, unit_logprob: float) -> float:
@@ -121,7 +142,8 @@ def word_deletions(flow_blocks: list[FlowBlock], worker_result: dict) -> tuple[s
         raw_token = flow_block.raw_tokens[flow_block.word_tokens[word_index]]
         unit_text = flow_block.plain_words[word_index]
         log_odds = noise_log_odds(unit_text, word_check["drop"] - word_check["keep"],
-                                  own_logprob(worker_result["blocks"], block_index, range(word_index, word_index + 1)))
+                                  unit_logprob(word_check, worker_result["blocks"], block_index,
+                                               range(word_index, word_index + 1)))
         if log_odds > NOISE_MARGIN and deletable_token(raw_token):
             deleted_words.add((block_index, word_index))
             decision_notes.append({"action": "delete_word", "block": block_index, "word": unit_text,
@@ -199,7 +221,8 @@ def block_decision(flow_blocks: list[FlowBlock], worker_result: dict, block_chec
     else:
         best_drop = max(block_check["drop_separate"], block_check["drop_merged"])
         evidence = noise_log_odds(block_text.replace(" ", ""), best_drop - block_check["keep"],
-                                  own_logprob(worker_result["blocks"], block_index, range(len(flow_block.plain_words))))
+                                  unit_logprob(block_check, worker_result["blocks"], block_index,
+                                               range(len(flow_block.plain_words))))
         required_margin = NOISE_MARGIN
     if evidence < required_margin:
         return None
@@ -235,5 +258,7 @@ def decide_edits(flow_blocks: list[FlowBlock], worker_result: dict) -> FlowEdits
                    if break_check["merged"] - break_check["keep"] >= BREAK_MARGIN]
     merged_blocks |= {break_note["block"] for break_note in break_notes}
     hyphen_fixes, hyphen_notes = decide_hyphen_fixes(worker_result)
+    word_respellings, respell_notes = decide_respellings(worker_result, frozenset(deleted_words))
     return FlowEdits(frozenset(deleted_words), frozenset(deleted_blocks), frozenset(merged_blocks - deleted_blocks),
-                     tuple(decision_notes + block_notes + break_notes + hyphen_notes), tuple(hyphen_fixes))
+                     tuple(decision_notes + block_notes + break_notes + hyphen_notes + respell_notes),
+                     tuple(hyphen_fixes), tuple(word_respellings))

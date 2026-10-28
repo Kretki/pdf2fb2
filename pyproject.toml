@@ -11,7 +11,8 @@ requires-python = ">=3.10,<3.13"
 # torch/transformers in workers/ocr_worker (each with its own .venv).
 dependencies = [
     "pymupdf>=1.26,<2",
-    "pillow>=11,<13",
+    "pillow>=13,<14; python_version >= '3.11'",  # 13.x fixes PYSEC-2026-4326..4328; needs Python 3.11+
+    "pillow>=11,<13; python_version < '3.11'",
     "worker-protocol",
     "opencv-python-headless>=4.10,<5",
     "numpy>=2,<3",
@@ -28,13 +29,14 @@ dev = [
 
 [project.scripts]
 pdf2fb2 = "pdf2fb2.interface.command_line:run_command_line"
+pdf2fb2-bench = "pdf2fb2.interface.benchmark_command:run_benchmark_command"
 
 [tool.uv]
 # Supply-chain safety: ignore package versions published in the last 7 days.
 exclude-newer = "7 days"
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]  # resolve only for your platform
 # semgrep pins mcp==1.29.0 (CVE-2026-59951); only its unused `semgrep mcp` subcommand imports it.
-override-dependencies = ["mcp>=1.30,<2"]
+override-dependencies = ["mcp>=1.30,<2", "opentelemetry-api>=1.45.1,<2"]
 
 [tool.uv.sources]
 worker-protocol = { path = "workers/worker_protocol", editable = true }
@@ -56,7 +58,8 @@ select = ["E", "F", "W", "I", "B", "N", "UP", "S"]
 
 [tool.ruff.lint.per-file-ignores]
 # S101: pytest tests assert by design (false positive for test code).
-"workers/*/unit_tests/*" = ["S101"]
+# S106/S311 in worker tests: tokenizer special-token names ("[PAD]") are not passwords; seeded test randomness.
+"workers/*/unit_tests/*" = ["S101", "S106", "S311"]
 "unit_tests/*" = ["S101"]
 
 [tool.ruff.lint.isort]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sync_environments.sh - create/update all six virtual environments of pdf2fb2.
+# sync_environments.sh - create/update all seven virtual environments of pdf2fb2.
 #
 # Usage:
 #   scripts/sync_environments.sh [extra uv sync arguments...]
@@ -15,6 +15,7 @@
 #   workers/readermarks_worker/.venv  PyTorch CUDA + timm/smp/OpenCV (reader-mark removal)
 #   workers/textar_worker/.venv   PyTorch CUDA + docTR (TexTAR word styles)
 #   workers/proofread_worker/.venv  PyTorch CUDA + transformers/bitsandbytes (Qwen3.5 proofreading)
+#   workers/verifier_worker/.venv   PyTorch CUDA + transformers (token verifier: training and pipeline jobs)
 #   uv.lock in each project directory. Exits non-zero on the first failing sync.
 set -euo pipefail
 
@@ -25,7 +26,8 @@ for project_directory in "${repository_root}" \
                          "${repository_root}/workers/ocr_worker" \
                          "${repository_root}/workers/readermarks_worker" \
                          "${repository_root}/workers/textar_worker" \
-                         "${repository_root}/workers/proofread_worker"; do
+                         "${repository_root}/workers/proofread_worker" \
+                         "${repository_root}/workers/verifier_worker"; do
   echo ">>> uv sync --project ${project_directory}"
   uv sync --project "${project_directory}" "$@"
 done

@@ -11,12 +11,13 @@ class ProgressDisplay(Protocol):
         ``PlainProgressDisplay`` (log lines) and ``SilentProgressDisplay`` (tests).
     """
 
-    def show_progress(self, overall_fraction: float, status_text: str) -> None:
+    def show_progress(self, overall_fraction: float, status_text: str, remaining_seconds: float | None = None) -> None:
         """Update the overall progress and the current status.
 
         Args:
             overall_fraction: Completed share of the whole conversion, 0..1.
             status_text: Short description of the current step.
+            remaining_seconds: Estimated time left (None: extrapolate from the fraction).
 
         Returns:
             None.
@@ -72,5 +73,55 @@ class StageProgress(Protocol):
 
         Returns:
             None.
+        """
+        ...
+
+
+class RunTimer(Protocol):
+    """Estimates the time left of a conversion and learns this machine's speed from it.
+
+    Usage:
+        Implemented by ``timing.run_timing.RunTiming``; injected into ``PipelineProgress``.
+    """
+
+    def record_report(self, stage_name: str, stage_fraction: float) -> None:
+        """Take one stage progress report.
+
+        Args:
+            stage_name: Reporting stage.
+            stage_fraction: Its completed share, 0..1.
+
+        Returns:
+            None.
+        """
+        ...
+
+    def revise_workload(self, **workload_sizes: int) -> None:
+        """Store workload sizes that became known (pages, text pages, tokens, inspected tokens).
+
+        Args:
+            **workload_sizes: Known sizes (>= 0).
+
+        Returns:
+            None.
+        """
+        ...
+
+    def remaining_seconds(self) -> float:
+        """Estimated time left.
+
+        Returns:
+            Seconds (>= 0).
+        """
+        ...
+
+    def learn_speeds(self) -> None:
+        """Store the speeds measured in this run for the next estimates.
+
+        Returns:
+            None.
+
+        Raises:
+            OSError: If the speeds cannot be stored.
         """
         ...

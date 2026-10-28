@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from pdf2fb2.parallel_work.parallel_mapping import map_in_threads
 from pdf2fb2.progress.progress_contracts import StageProgress
 from pdf2fb2.rendering.segment_drawing import draw_segment_overlay
 
@@ -39,12 +40,11 @@ def draw_overlays(page_records: list[dict], output_directory: Path, stage_progre
     """
     drawings_directory = output_directory / VISUALIZATION_DIRECTORY
     drawings_directory.mkdir(exist_ok=True)
-    page_count = len(page_records)
-    for page_position, page_record in enumerate(page_records, start=1):
-        stage_progress.advance_stage(page_position - 1, page_count,
-                                     f"drawing segments of page {page_position}/{page_count}")
-        draw_segment_overlay(Path(page_record["image"]), page_record["segments"],
-                             drawings_directory / f"page_{page_record['page']:04d}_segments.png")
+    map_in_threads(lambda page_record: draw_segment_overlay(
+        Path(page_record["image"]), page_record["segments"],
+        drawings_directory / f"page_{page_record['page']:04d}_segments.png"), page_records,
+        lambda drawn_count, page_count: stage_progress.advance_stage(
+            drawn_count, page_count, f"drawing segments of page {drawn_count}/{page_count}"))
     return drawings_directory
 
 

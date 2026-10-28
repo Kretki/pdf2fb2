@@ -61,7 +61,7 @@ def render_bar(overall_fraction: float, bar_width: int) -> str:
 
 
 def compose_progress_line(title_text: str, overall_fraction: float, elapsed_seconds: float,
-                          terminal_columns: int) -> str:
+                          terminal_columns: int, remaining_seconds: float | None = None) -> str:
     """Build ``title:  42%|████▏     | 00:31<00:43``, fitted to the terminal width.
 
     Usage:
@@ -72,11 +72,14 @@ def compose_progress_line(title_text: str, overall_fraction: float, elapsed_seco
         overall_fraction: Completed share, 0..1.
         elapsed_seconds: Time since the start, in seconds.
         terminal_columns: Terminal width in characters.
+        remaining_seconds: Estimated time left; None extrapolates it linearly from the fraction.
 
     Returns:
         One line without a newline, at most ``terminal_columns - 1`` characters.
     """
-    remaining_text = format_duration(estimate_remaining(elapsed_seconds, overall_fraction))
+    if remaining_seconds is None:
+        remaining_seconds = estimate_remaining(elapsed_seconds, overall_fraction)
+    remaining_text = format_duration(remaining_seconds)
     line_prefix = f"{title_text}: {int(overall_fraction * 100):3d}%|"
     line_suffix = f"| {format_duration(elapsed_seconds)}<{remaining_text}"
     free_columns = terminal_columns - 1 - len(line_prefix) - len(line_suffix)

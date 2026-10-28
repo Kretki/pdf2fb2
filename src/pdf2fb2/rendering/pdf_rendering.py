@@ -1,19 +1,67 @@
 """Rendering PDF pages and regions to images with PyMuPDF."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pymupdf
 from PIL import Image
+
+from pdf2fb2.parallel_work.parallel_mapping import map_in_processes
 
 POINTS_PER_INCH = 72.0
 MIN_REGION_POINTS = 2
 COVER_HEIGHT_PIXELS = 1200
 
 
+@dataclass(frozen=True)
+class PageRenderTask:
+    """One page to render in a worker process.
+
+    Attributes:
+        pdf_path: Input PDF.
+        page_index: 0-based page index.
+        image_path: PNG file to write.
+        render_dpi: Resolution in dots per inch, 72..600.
+    """
+
+    pdf_path: Path
+    page_index: int
+    image_path: Path
+    render_dpi: int
+
+
+def render_page_task(render_task: PageRenderTask) -> Path:
+    """Render one page to PNG (runs in a worker process, so it opens the PDF itself).
+
+    Args:
+        render_task: Page, target file and resolution.
+
+    Returns:
+        Path of the written PNG.
+    """
+    with pymupdf.open(render_task.pdf_path) as pdf_document:
+        pdf_document[render_task.page_index].get_pixmap(dpi=render_task.render_dpi,
+                                                        alpha=False).save(render_task.image_path)
+    return render_task.image_path
+
+
+def count_pdf_pages(pdf_path: Path) -> int:
+    """Number of pages of a PDF.
+
+    Args:
+        pdf_path: Input PDF.
+
+    Returns:
+        Page count (>= 0).
+    """
+    with pymupdf.open(pdf_path) as pdf_document:
+        return pdf_document.page_count
+
+
 def render_pdf_pages(pdf_path: Path, output_directory: Path, render_dpi: int,
                      page_callback: Callable[[int, int], None] | None = None) -> list[Path]:
-    """Render every page of a PDF to a PNG file.
+    """Render every page of a PDF to a PNG file, pages in parallel worker processes.
 
     Usage:
         First pipeline step; the images feed segmentation and OCR.
@@ -22,21 +70,16 @@ def render_pdf_pages(pdf_path: Path, output_directory: Path, render_dpi: int,
         pdf_path: Input PDF.
         output_directory: Directory for ``page_NNNN.png`` (created if missing).
         render_dpi: Resolution in dots per inch, 72..600.
-        page_callback: Optional ``callback(page_number, page_count)`` called before each page is rendered.
+        page_callback: Optional ``callback(rendered_count, page_count)`` called after each rendered page
+            (in completion order).
 
     Returns:
         Paths of the rendered pages, in page order.
     """
     output_directory.mkdir(parents=True, exist_ok=True)
-    page_images = []
-    with pymupdf.open(pdf_path) as pdf_document:
-        for page_number, pdf_page in enumerate(pdf_document, start=1):
-            if page_callback is not None:
-                page_callback(page_number, pdf_document.page_count)
-            image_path = output_directory / f"page_{page_number:04d}.png"
-            pdf_page.get_pixmap(dpi=render_dpi, alpha=False).save(image_path)
-            page_images.append(image_path)
-    return page_images
+    render_tasks = [PageRenderTask(pdf_path, page_index, output_directory / f"page_{page_index + 1:04d}.png",
+                                   render_dpi) for page_index in range(count_pdf_pages(pdf_path))]
+    return map_in_processes(render_page_task, render_tasks, page_callback)
 
 
 def _pixmap_to_image(page_pixmap: pymupdf.Pixmap) -> Image.Image:

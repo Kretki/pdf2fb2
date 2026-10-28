@@ -15,6 +15,7 @@ OCR_PROGRESS_EVENT = "ocr_progress"
 MARKS_PAGE_EVENT = "marks_page"
 STYLE_PAGE_EVENT = "style_page"
 PROOFREAD_PROGRESS_EVENT = "proofread_progress"
+VERIFY_PROGRESS_EVENT = "verify_progress"
 
 
 def emit_progress_event(event_name: str, **event_fields: int | str) -> None:

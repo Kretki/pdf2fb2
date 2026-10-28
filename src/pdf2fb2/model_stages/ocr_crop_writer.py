@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from pdf2fb2.model_stages.ocr_text_cache import OcrTextCache, build_segment_key
+from pdf2fb2.parallel_work.parallel_mapping import map_in_threads
 from pdf2fb2.progress.progress_contracts import StageProgress
 from pdf2fb2.rendering.image_cropping import crop_segment_for_ocr
 from pdf2fb2.segments.label_roles import ocr_token_limit, requires_ocr
@@ -72,11 +73,12 @@ class OcrCropWriter:
         Returns:
             Pending crops in job order.
         """
-        pending_crops: list[PendingCrop] = []
-        for page_position, page_record in enumerate(page_records, start=1):
-            stage_progress.advance_stage(0, 1, f"cropping blocks on page {page_position}/{self._page_count}")
-            pending_crops.extend(self._write_page_crops(page_record, page_position))
-        return pending_crops
+        page_crops = map_in_threads(
+            lambda page_entry: self._write_page_crops(page_entry[1], page_entry[0]),
+            list(enumerate(page_records, start=1)),
+            lambda cropped_count, page_count: stage_progress.advance_stage(
+                0, 1, f"cropping blocks on page {cropped_count}/{self._page_count}"))
+        return [pending_crop for crops_of_page in page_crops for pending_crop in crops_of_page]
 
     def _write_page_crops(self, page_record: dict, page_position: int) -> list[PendingCrop]:
         """Save the crops of the uncached OCR segments of one page.

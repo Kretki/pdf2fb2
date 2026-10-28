@@ -1,4 +1,5 @@
-"""Apply proofreading edits to the book flow: delete words and blocks, respell hyphen breaks, re-join paragraphs.
+"""Apply proofreading edits to the book flow: delete words and blocks, respell hyphen breaks and misread words,
+re-join paragraphs.
 
 Deleting a wrong heading removes the section split it caused (sections are built from headings
 when the FB2 is rendered); a paragraph marked as merged is appended to the previous surviving
@@ -9,6 +10,7 @@ from pdf2fb2.fb2_output.text_markup import join_text_fragments
 from pdf2fb2.proofreading.edit_decisions import FlowEdits
 from pdf2fb2.proofreading.flow_blocks import FlowBlock
 from pdf2fb2.proofreading.hyphen_repair import HyphenFix, is_hyphen, repaired_token
+from pdf2fb2.proofreading.word_respelling import WordRespelling, respelled_raw_token
 
 
 def respelled_tokens(flow_block: FlowBlock, hyphen_fixes: list[HyphenFix],
@@ -39,8 +41,32 @@ def respelled_tokens(flow_block: FlowBlock, hyphen_fixes: list[HyphenFix],
     return replacements
 
 
+def respelled_words(flow_block: FlowBlock, word_respellings: list[WordRespelling],
+                     taken_tokens: dict[int, str | None]) -> dict[int, str]:
+    """Raw-token replacements of the word respellings of one block.
+
+    Args:
+        flow_block: Block of the item.
+        word_respellings: Respellings of this block.
+        taken_tokens: Tokens already replaced by hyphen fixes or deletions (left alone).
+
+    Returns:
+        Mapping raw token index -> new text; respellings that cannot keep the markup are skipped.
+    """
+    replacements: dict[int, str] = {}
+    for word_respelling in word_respellings:
+        token_index = flow_block.word_tokens[word_respelling.word_index]
+        if token_index in taken_tokens:
+            continue
+        new_token = respelled_raw_token(flow_block.raw_tokens[token_index],
+                                        flow_block.plain_words[word_respelling.word_index], word_respelling.spelling)
+        if new_token is not None:
+            replacements[token_index] = new_token
+    return replacements
+
+
 def edited_block_text(flow_block: FlowBlock, block_index: int, flow_edits: FlowEdits) -> str | None:
-    """Item text with the deleted words removed and the hyphen breaks respelled.
+    """Item text with the deleted words removed and the hyphen breaks and misread words respelled.
 
     Args:
         flow_block: Block of the item.
@@ -55,6 +81,8 @@ def edited_block_text(flow_block: FlowBlock, block_index: int, flow_edits: FlowE
     replacements.update(dict.fromkeys(flow_block.word_tokens[word_index]
                                       for word_index in range(len(flow_block.word_tokens))
                                       if (block_index, word_index) in flow_edits.deleted_words))
+    replacements.update(respelled_words(flow_block, [word_respelling for word_respelling in flow_edits.word_respellings
+                                                     if word_respelling.block_index == block_index], replacements))
     if not replacements:
         return None
     return " ".join(replacements.get(token_index, raw_token) for token_index, raw_token

@@ -1,10 +1,13 @@
 """Qianfan-OCR running in-process with transformers on local weights."""
 
+from functools import partial
 from pathlib import Path
 
 import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
+
+from ocr_worker.cuda_memory_guard import CudaMemoryGuard
 
 
 class TransformersOcrEngine:
@@ -17,19 +20,22 @@ class TransformersOcrEngine:
 
     supports_parallel_requests = False
 
-    def __init__(self, model_directory: Path, device_name: str, prompt_text: str) -> None:
+    def __init__(self, model_directory: Path, device_name: str, prompt_text: str,
+                 memory_guard: CudaMemoryGuard | None = None) -> None:
         """Load the model and processor.
 
         Args:
             model_directory: Directory with the Qianfan-OCR weights (``models/Qianfan-OCR``).
             device_name: ``gpu:N``/``cuda:N`` or ``cpu``; ``gpu`` is mapped to ``cuda``.
             prompt_text: Instruction sent with every crop.
+            memory_guard: Out-of-memory retry policy; None uses the default ``CudaMemoryGuard``.
 
         Raises:
             OSError: If the weights are missing or incomplete.
             ValueError: If the installed transformers does not know the model type.
         """
         self._prompt_text = prompt_text
+        self._memory_guard = memory_guard or CudaMemoryGuard()
         torch_device = device_name.replace("gpu", "cuda")
         print(f"ocr_worker: loading Qianfan-OCR from {model_directory} on {torch_device}", flush=True)
         # B615: weights are loaded from a local directory only (local_files_only=True), never downloaded.
@@ -37,8 +43,11 @@ class TransformersOcrEngine:
             str(model_directory), dtype=torch.bfloat16, device_map=torch_device, local_files_only=True
         )
         self._ocr_model = loaded_model.eval()
+        # The config has no transformers_version, so transformers suspects a Mistral tokenizer and warns.
+        # Qianfan's Qwen2 tokenizer is correct as saved: True would split mixed-case words (McDonald -> Mc Donald)
+        # unlike in training, so the flag is set to False, which only silences the false warning.
         self._processor = AutoProcessor.from_pretrained(  # nosec B615
-            str(model_directory), local_files_only=True
+            str(model_directory), local_files_only=True, fix_mistral_regex=False
         )
 
     def recognize_image(self, crop_image: Image.Image, max_new_tokens: int) -> str:
@@ -53,6 +62,25 @@ class TransformersOcrEngine:
 
         Returns:
             Decoded model output without the prompt tokens.
+
+        Raises:
+            torch.cuda.OutOfMemoryError: If the crop still runs out of memory after a cache flush.
+            EngineUnavailableError: If several crops in a row ran out of memory (the GPU is unusable).
+        """
+        return self._memory_guard.run_guarded(partial(self._generate_text, crop_image, max_new_tokens))
+
+    def _generate_text(self, crop_image: Image.Image, max_new_tokens: int) -> str:
+        """Run one greedy generation for a crop.
+
+        Args:
+            crop_image: RGB crop of one layout segment.
+            max_new_tokens: Generation budget, 1..32768.
+
+        Returns:
+            Decoded model output without the prompt tokens.
+
+        Raises:
+            torch.cuda.OutOfMemoryError: If the device cannot hold the request.
         """
         chat_messages = [{"role": "user", "content": [
             {"type": "image", "image": crop_image}, {"type": "text", "text": self._prompt_text}]}]

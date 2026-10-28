@@ -5,7 +5,7 @@ from functools import partial
 
 from PIL import Image
 
-from ocr_worker.engine_protocol import OcrEngine
+from ocr_worker.engine_protocol import EngineUnavailableError, OcrEngine
 from worker_protocol.json_files import append_json_line
 from worker_protocol.ocr_job_schema import OcrCropItem, OcrJobSpec
 from worker_protocol.progress_events import OCR_PROGRESS_EVENT, emit_progress_event
@@ -24,12 +24,17 @@ def recognize_item(ocr_request: OcrJobSpec, ocr_engine: OcrEngine, ocr_item: Ocr
 
     Returns:
         Result record ``{"item_key": str, "text": str, "error": str | None}``.
+
+    Raises:
+        EngineUnavailableError: If the engine cannot read any further crop (stops the job).
     """
     try:
         with Image.open(ocr_request.resolve_inside(ocr_item.image_file)) as crop_file:
             crop_image = crop_file.convert("RGB")
         recognized_text = ocr_engine.recognize_image(crop_image, ocr_item.max_new_tokens)
         return {"item_key": ocr_item.item_key, "text": recognized_text, "error": None}
+    except EngineUnavailableError:
+        raise
     except Exception as recognition_error:  # noqa: BLE001 - reported per item, the job keeps going
         return {"item_key": ocr_item.item_key, "text": "",
                 "error": f"{type(recognition_error).__name__}: {recognition_error}"}
@@ -50,6 +55,9 @@ def run_ocr_job(ocr_request: OcrJobSpec, ocr_engine: OcrEngine) -> int:
 
     Returns:
         Number of crops that failed.
+
+    Raises:
+        EngineUnavailableError: If the engine became unusable; results written so far are kept.
     """
     result_path = ocr_request.resolve_inside(ocr_request.result_file)
     thread_count = ocr_request.parallel_requests if ocr_engine.supports_parallel_requests else 1

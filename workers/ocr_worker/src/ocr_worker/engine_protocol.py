@@ -5,6 +5,15 @@ from typing import Protocol
 from PIL import Image
 
 
+class EngineUnavailableError(RuntimeError):
+    """Raised by an engine that can no longer read any crop (e.g. its GPU refuses every allocation).
+
+    Usage:
+        The job runner stops the job on this error instead of recording a failure for every
+        remaining crop; the worker then exits with a code the orchestrator treats as a failure.
+    """
+
+
 class OcrEngine(Protocol):
     """Reads the text of one image crop.
 
@@ -28,5 +37,9 @@ class OcrEngine(Protocol):
 
         Returns:
             Raw model output (Markdown / HTML tables).
+
+        Raises:
+            EngineUnavailableError: If the engine cannot serve any further crop.
+            Exception: Any other error fails only this crop.
         """
         ...

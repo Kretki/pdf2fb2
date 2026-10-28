@@ -48,6 +48,19 @@ def requires_ocr(segment_label: str) -> bool:
     return segment_label not in SKIPPED_LABELS and segment_label not in PICTURE_LABELS
 
 
+def is_book_text(page_segment: dict) -> bool:
+    """Whether a segment's OCR text reaches the FB2 as book text.
+
+    Args:
+        page_segment: Segment record.
+
+    Returns:
+        True for OCR'd segments other than page numbers.
+    """
+    segment_label = page_segment.get("label", "")
+    return requires_ocr(segment_label) and segment_label not in PAGE_NUMBER_LABELS
+
+
 def ocr_token_limit(segment_label: str) -> int:
     """Return the generation budget for a segment label.
 

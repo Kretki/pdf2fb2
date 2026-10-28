@@ -5,6 +5,7 @@ Usage:
 """
 
 import argparse
+import sys
 
 from pdf2fb2.document_sources.djvu_source import DjvuToPdfConverter
 from pdf2fb2.document_sources.pdf_source import PdfPassThrough
@@ -14,22 +15,30 @@ from pdf2fb2.model_stages.marks_stage import MarksStage
 from pdf2fb2.model_stages.ocr_stage import OcrBackendSettings, OcrStage
 from pdf2fb2.model_stages.proofread_stage import ProofreadStage
 from pdf2fb2.model_stages.style_stage import StyleStage
-from pdf2fb2.pipeline.conversion_pipeline import ConversionPipeline, OptionalStages
+from pdf2fb2.model_stages.verify_stage import VerifyStage
+from pdf2fb2.pipeline.conversion_pipeline import ConversionPipeline, OptionalStages, TimingSetup
 from pdf2fb2.pipeline.handwriting_check import HandwritingCheck
 from pdf2fb2.pipeline.layout_review import SEGMENT_REVIEW_RULES, LayoutReview
 from pdf2fb2.pipeline.mark_rescan import MarkRescanner
 from pdf2fb2.pipeline.picture_recovery import PictureRecovery
 from pdf2fb2.pipeline.residual_rescan import ResidualTextRescan
 from pdf2fb2.progress.progress_contracts import ProgressDisplay
-from pdf2fb2.project_paths import READERMARKS_CHECKPOINT_DIRECTORY
+from pdf2fb2.project_paths import READERMARKS_CHECKPOINT_DIRECTORY, SPEED_METRICS_FILE
 from pdf2fb2.proofreading.flow_proofreader import LanguageModelProofreader
 from pdf2fb2.segments.glyph_measurement import OpenCvGlyphMeter
+from pdf2fb2.text_verification.feedback_loop import VerificationFeedback
+from pdf2fb2.text_verification.word_flagging import VerifierWordFlagger
+from pdf2fb2.timekeeping.run_timing import RunTiming
+from pdf2fb2.timekeeping.speed_metrics_store import JsonSpeedMetricsStore
+from pdf2fb2.timekeeping.time_estimation import ConversionPlan
+from pdf2fb2.timekeeping.workload_units import FLAGGED_SCOPE, FULL_SCOPE
 from pdf2fb2.worker_runtime.worker_environment import (
     LAYOUT_WORKER,
     MARKS_WORKER,
     OCR_WORKER,
     PROOFREAD_WORKER,
     STYLE_WORKER,
+    VERIFY_WORKER,
 )
 from pdf2fb2.worker_runtime.worker_launcher import SubprocessWorkerLauncher
 from worker_protocol.ocr_job_schema import HTTP_BACKEND, TRANSFORMERS_BACKEND
@@ -101,6 +110,76 @@ def build_residual_rescan(parsed_arguments: argparse.Namespace,
     return ResidualTextRescan(OpenCvGlyphMeter(), proposal_stage)
 
 
+def build_verify_stage(parsed_arguments: argparse.Namespace,
+                       worker_launcher: SubprocessWorkerLauncher) -> VerifyStage | None:
+    """Token verifier stage, when enabled and a fine-tuned verifier exists.
+
+    Args:
+        parsed_arguments: Parsed command line.
+        worker_launcher: Process launcher.
+
+    Returns:
+        The stage, or None (``--no-verify`` or no ``config.json`` in the verifier directory).
+    """
+    if parsed_arguments.skip_verify:
+        return None
+    if not (parsed_arguments.verify_model_directory / "config.json").is_file():
+        print(f"pdf2fb2: no token verifier in {parsed_arguments.verify_model_directory}: no OCR re-reads, "
+              f"proofreading scores the whole text", file=sys.stderr)
+        return None
+    return VerifyStage(worker_launcher, VERIFY_WORKER, parsed_arguments.verify_model_directory,
+                       parsed_arguments.device_name)
+
+
+def build_flow_checker(parsed_arguments: argparse.Namespace, worker_launcher: SubprocessWorkerLauncher,
+                       verify_stage: VerifyStage | None) -> LanguageModelProofreader | None:
+    """Qwen3.5 proofreading, limited to verifier-flagged words when a verifier is available.
+
+    Args:
+        parsed_arguments: Parsed command line.
+        worker_launcher: Process launcher.
+        verify_stage: Token verifier (None: full mode).
+
+    Returns:
+        The proofreader, or None with ``--no-proofread``.
+    """
+    if parsed_arguments.skip_proofread:
+        return None
+    word_flagger = None if verify_stage is None or parsed_arguments.full_proofread \
+        else VerifierWordFlagger(verify_stage)
+    return LanguageModelProofreader(ProofreadStage(worker_launcher, PROOFREAD_WORKER,
+                                                   parsed_arguments.proofread_model_directory,
+                                                   parsed_arguments.device_name), word_flagger)
+
+
+def stored_speed_timer(conversion_plan: ConversionPlan) -> RunTiming:
+    """Run timer that reads and updates this machine's speed metrics file.
+
+    Args:
+        conversion_plan: Plan of the conversion.
+
+    Returns:
+        The timer.
+    """
+    return RunTiming(conversion_plan, JsonSpeedMetricsStore(SPEED_METRICS_FILE))
+
+
+def build_timing_setup(flow_checker: LanguageModelProofreader | None, verify_stage: VerifyStage | None,
+                       parsed_arguments: argparse.Namespace) -> TimingSetup:
+    """Timing of the conversions: stored speeds and the proofreading scope.
+
+    Args:
+        flow_checker: Proofreader (None: no proofreading).
+        verify_stage: Token verifier (None: proofreading inspects every word).
+        parsed_arguments: Parsed command line (``--full-proofread``).
+
+    Returns:
+        Timing setup of the pipeline.
+    """
+    flagged_mode = flow_checker is not None and verify_stage is not None and not parsed_arguments.full_proofread
+    return TimingSetup(FLAGGED_SCOPE if flagged_mode else FULL_SCOPE, stored_speed_timer)
+
+
 def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: ProgressDisplay) -> ConversionPipeline:
     """Wire the stages with the subprocess launcher, the worker venvs and the progress display.
 
@@ -126,12 +205,14 @@ def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: Progr
     style_stage = None if parsed_arguments.skip_styles else StyleStage(
         worker_launcher, STYLE_WORKER, parsed_arguments.textar_model_directory,
         parsed_arguments.doctr_model_directory, parsed_arguments.device_name)
-    flow_checker = None if parsed_arguments.skip_proofread else LanguageModelProofreader(ProofreadStage(
-        worker_launcher, PROOFREAD_WORKER, parsed_arguments.proofread_model_directory, parsed_arguments.device_name))
+    verify_stage = build_verify_stage(parsed_arguments, worker_launcher)
+    flow_checker = build_flow_checker(parsed_arguments, worker_launcher, verify_stage)
     return ConversionPipeline(layout_stage, ocr_stage, progress_display, OptionalStages(
         handwriting_detector=handwriting_check, mark_rescanner=mark_rescanner,
         picture_recoverer=build_picture_recovery(parsed_arguments, worker_launcher),
         residual_finder=build_residual_rescan(parsed_arguments, worker_launcher),
         segment_reviewer=None if parsed_arguments.skip_layout_review else LayoutReview(SEGMENT_REVIEW_RULES),
         layout_reviewer=None if parsed_arguments.skip_layout_review else LayoutReview(),
-        style_detector=style_stage, flow_checker=flow_checker), build_source_registry())
+        style_detector=style_stage, flow_checker=flow_checker,
+        text_verifier=None if verify_stage is None else VerificationFeedback(verify_stage, ocr_stage)),
+        build_source_registry(), build_timing_setup(flow_checker, verify_stage, parsed_arguments))

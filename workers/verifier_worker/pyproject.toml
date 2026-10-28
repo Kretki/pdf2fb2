@@ -1,0 +1,43 @@
+[project]
+name = "verifier-worker"
+version = "0.1.0"
+description = "Token verifier worker for pdf2fb2: multilingual encoder labelling OCR units as correct / misread / inserted."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.13,<3",                          # cu130 wheels: RTX 50-series (sm_120)
+    "transformers>=5.19,<6",                   # XLM-RoBERTa token classification, fast tokenizers
+    "sentencepiece>=0.2.1,<1",                 # XLM-RoBERTa tokenizer model
+    "safetensors>=0.6,<1",
+    "worker-protocol",
+]
+
+[dependency-groups]
+dev = ["pip-audit>=2.9,<3", "pytest>=8.4,<10"]
+
+[tool.uv]
+# Supply-chain safety: ignore package versions published in the last 7 days.
+exclude-newer = "7 days"
+# The PyTorch index publishes no upload dates; torch is bounded by a version range instead.
+exclude-newer-package = { torch = false }
+# setuptools is pulled in by torch; versions below 83 have PYSEC-2026-3447.
+constraint-dependencies = ["setuptools>=83"]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+worker-protocol = { path = "../worker_protocol", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["unit_tests"]
+
+[tool.uv.build-backend]
+module-name = "token_verifier"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"

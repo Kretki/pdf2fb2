@@ -221,6 +221,23 @@ class TextStyleDetector(Protocol):
         ...
 
 
+class TextVerifier(Protocol):
+    """Checks OCR text against its context and re-reads what does not fit (see ``text_verification``)."""
+
+    def verify_segments(self, page_records: list[dict], work_directory: Path, stage_progress: StageProgress) -> dict:
+        """Verify the segment texts and replace those whose re-read reads better.
+
+        Args:
+            page_records: OCR'd page records with word boxes (segment ``text`` mutated).
+            work_directory: Output directory.
+            stage_progress: Progress sink.
+
+        Returns:
+            Summary counts.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RescanProgress:
     """Progress sinks of the two steps of the reader-mark rescan.

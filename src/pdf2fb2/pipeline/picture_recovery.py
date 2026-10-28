@@ -13,6 +13,7 @@ Flow (after the reader-mark rescan, before OCR):
 from dataclasses import asdict
 from pathlib import Path
 
+from pdf2fb2.parallel_work.parallel_mapping import map_in_threads
 from pdf2fb2.pipeline.mark_rescan import stage_cleaned_pages
 from pdf2fb2.pipeline.stage_contracts import BoxProposer, GlyphMeter
 from pdf2fb2.progress.progress_contracts import StageProgress
@@ -143,14 +144,12 @@ class PictureRecovery:
         Returns:
             Measurements aligned with ``page_records``.
         """
-        page_measurements = []
-        page_count = len(page_records)
-        for page_position, page_record in enumerate(page_records, start=1):
-            stage_progress.advance_stage(page_position - 1, 2 * page_count,
-                                         f"measuring fonts of page {page_position}/{page_count}")
-            page_glyphs = self._glyph_meter.measure_page(page_record)
+        page_measurements = map_in_threads(
+            self._glyph_meter.measure_page, page_records,
+            lambda measured_count, page_count: stage_progress.advance_stage(
+                measured_count, 2 * page_count, f"measuring fonts of page {measured_count}/{page_count}"))
+        for page_record, page_glyphs in zip(page_records, page_measurements, strict=True):
             store_glyph_heights(page_record, page_glyphs)
-            page_measurements.append(page_glyphs)
         return page_measurements
 
     def _choose_pictures(self, off_size_regions: list[OffSizeRegion], font_statistics: FontStatistics,

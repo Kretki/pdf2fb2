@@ -13,6 +13,7 @@ Flow (last step before OCR):
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from pdf2fb2.parallel_work.parallel_mapping import map_in_threads
 from pdf2fb2.pipeline.mark_rescan import stage_cleaned_pages
 from pdf2fb2.pipeline.page_merging import insert_by_position
 from pdf2fb2.pipeline.stage_contracts import BoxProposer, GlyphMeter
@@ -167,7 +168,9 @@ class ResidualTextRescan:
             WorkerFailedError: If the layout worker fails.
             ValueError: If a page image cannot be read.
         """
-        page_measurements = [self._measure_page(page_record) for page_record in page_records]
+        page_measurements = map_in_threads(self._glyph_meter.measure_page, page_records)
+        for page_record, page_glyphs in zip(page_records, page_measurements, strict=True):
+            store_glyph_heights(page_record, page_glyphs)
         font_statistics = collect_font_statistics(page_records)
         if font_statistics is None:
             stage_progress.advance_stage(1, 1, "too few paragraphs for residual text statistics")
@@ -181,19 +184,6 @@ class ResidualTextRescan:
         added_count = sum(len(block_segments) for block_segments in added_segments.values())
         stage_progress.advance_stage(1, 1, f"{added_count} missed blocks added on {len(added_segments)} pages")
         return added_count
-
-    def _measure_page(self, page_record: dict) -> PageGlyphs:
-        """Measure one page and store its segment glyph heights.
-
-        Args:
-            page_record: Page record (mutated: ``glyph_height`` stored).
-
-        Returns:
-            The measurements.
-        """
-        page_glyphs = self._glyph_meter.measure_page(page_record)
-        store_glyph_heights(page_record, page_glyphs)
-        return page_glyphs
 
     def _propose_boxes(self, page_records: list[dict], blocks_by_page: dict[int, list[ResidualBlock]],
                        work_directory: Path, stage_progress: StageProgress) -> dict[int, list[dict]]:

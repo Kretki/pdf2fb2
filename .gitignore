@@ -16,6 +16,9 @@ models/readermarks/*
 models/doctr/*
 models/textar/*
 models/qwen3.5-9B/*
+models/token_verifier/*
+models/xlm-roberta-base/*
+benchmark_data
 readermarks_data
 test_res
 test.sh
@@ -26,4 +29,9 @@ pdf2fb2_output
 *.tmp
 .ruff_cache
 AGENTS.md
-STAGE_CLEAN.md
+STAGE_CLEAN.mdbenchmark_data
+benchmark_runs
+verifier_data
+
+# Speed metrics of this machine (time estimates)
+metrics/
