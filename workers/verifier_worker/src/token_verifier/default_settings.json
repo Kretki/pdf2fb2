@@ -3,18 +3,22 @@
     "base_model": "models/xlm-roberta-base",
     "output_model": "models/token_verifier",
     "data_directory": "benchmark_data",
-    "reports_directory": "benchmark_data/verifier_reports"
+    "reports_directory": "benchmark_data/verifier_reports",
+    "language_model": "models/xlm-roberta-base",
+    "visual_model": "models/dinov2-small"
   },
   "synthesis": {
     "examples_per_chunk": 3,
     "misread_rate": 0.06,
-    "insert_rate": 0.3,
-    "max_insert_units": 8,
-    "random_seed": 1234
+    "insert_rate": 0.4,
+    "max_insert_units": 4,
+    "random_seed": 1234,
+    "min_segment_units": 3,
+    "max_segment_units": 150
   },
   "training": {
     "device_name": "cuda:0",
-    "max_tokens": 256,
+    "max_tokens": 384,
     "window_units": 96,
     "batch_size": 16,
     "gradient_accumulation": 2,
@@ -22,10 +26,33 @@
     "weight_decay": 0.01,
     "warmup_ratio": 0.06,
     "epoch_count": 4,
-    "class_weights": [1.0, 3.0, 3.0],
-    "real_repeat": 3,
-    "language_balance_cap": 8,
+    "class_weights": [
+      1.0,
+      1.5,
+      1.5
+    ],
+    "real_repeat": 1,
+    "language_balance_cap": 3,
     "mixed_precision": true,
-    "random_seed": 1234
+    "random_seed": 1234,
+    "early_stop_patience": 2,
+    "backbone_kind": "auto",
+    "context_units": 32,
+    "freeze_word_embeddings": true,
+    "layer_decay": 0.9,
+    "rdrop_weight": 0.5,
+    "ema_decay": 0.999,
+    "ensemble_members": 1,
+    "evidence_dropout": 0.3,
+    "real_stage_epochs": 2,
+    "real_stage_learning_rate": 1e-05,
+    "synthetic_replay_share": 0.15,
+    "rendered_repeat": 1,
+    "use_relabelled_real": true
+  },
+  "relabel": {
+    "fold_count": 4,
+    "fold_epochs": 1,
+    "relabel_confidence": 0.9
   }
 }

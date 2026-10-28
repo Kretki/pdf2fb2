@@ -36,7 +36,21 @@ pdf2fb2-bench = "pdf2fb2.interface.benchmark_command:run_benchmark_command"
 exclude-newer = "7 days"
 environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]  # resolve only for your platform
 # semgrep pins mcp==1.29.0 (CVE-2026-59951); only its unused `semgrep mcp` subcommand imports it.
-override-dependencies = ["mcp>=1.30,<2", "opentelemetry-api>=1.45.1,<2"]
+# opentelemetry-api is raised for security; the rest of the opentelemetry family must move with it (semgrep pins
+# 1.37 / 0.58b0, whose exporter imports names the 1.45 API no longer has, so semgrep would not start).
+override-dependencies = [
+    "mcp>=1.30,<2",
+    "opentelemetry-api>=1.45.1,<1.46",
+    "opentelemetry-sdk>=1.45.1,<1.46",
+    "opentelemetry-proto>=1.45.1,<1.46",
+    "opentelemetry-exporter-otlp-proto-common>=1.45.1,<1.46",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1,<1.46",
+    "opentelemetry-semantic-conventions>=0.66b1,<0.67",
+    "opentelemetry-instrumentation>=0.66b1,<0.67",
+    "opentelemetry-instrumentation-requests>=0.66b1,<0.67",
+    "opentelemetry-instrumentation-threading>=0.66b1,<0.67",
+    "opentelemetry-util-http>=0.66b1,<0.67",
+]
 
 [tool.uv.sources]
 worker-protocol = { path = "workers/worker_protocol", editable = true }

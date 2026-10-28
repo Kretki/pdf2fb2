@@ -18,6 +18,9 @@ models/textar/*
 models/qwen3.5-9B/*
 models/token_verifier/*
 models/xlm-roberta-base/*
+models/fonts/*
+models/mdeberta-v3-base/*
+models/byt5-small/*
 benchmark_data
 readermarks_data
 test_res

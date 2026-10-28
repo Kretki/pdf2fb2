@@ -1,6 +1,7 @@
 """Unit tests of the benchmark: catalog filter, normalisation, alignment, locating, splits and labels."""
 
 import csv
+import json
 from pathlib import Path
 
 import pytest
@@ -8,10 +9,12 @@ import pytest
 from pdf2fb2.benchmark.book_splits import TEST_SPLIT, VALID_SPLIT, locked_splits
 from pdf2fb2.benchmark.corpus_catalog import CatalogBook, corpus_path, read_correct_books
 from pdf2fb2.benchmark.edit_alignment import align_words, character_errors
+from pdf2fb2.benchmark.label_reliability import page_is_reliable, segment_is_reliable
 from pdf2fb2.benchmark.page_sampling import sample_pages
 from pdf2fb2.benchmark.page_scoring import BookScorer
+from pdf2fb2.benchmark.rendered_export import export_rendered
 from pdf2fb2.benchmark.text_normalization import comparison_words, normalize_text
-from pdf2fb2.benchmark.verifier_export import token_labels
+from pdf2fb2.benchmark.verifier_export import page_examples, token_labels
 from pdf2fb2.text_verification.verify_units import verify_units
 
 CATALOG_FIELDS = ["book_key", "language", "language_code", "image_pdf_path", "structured_text_path",
@@ -138,3 +141,67 @@ def test_token_labels_for_verifier_training() -> None:
     page_units = [verify_unit.unit_text for verify_unit in verify_units("## The rnodern NOTE age")]
     assert token_labels(page_units, ["The", "modern", "age"]) == ["ignore", "correct", "misread", "inserted",
                                                                   "correct"]
+
+
+def test_convention_differences_are_ignored() -> None:
+    """Misreads that differ only by case, punctuation or a footnote marker are not OCR errors."""
+    assert token_labels(["Пролет", "ассоциациям¹)", "rnodern"], ["Пролет.", "ассоциациям", "modern"]) == \
+        ["ignore", "ignore", "misread"]
+
+
+def test_unreliable_pages_and_segments_are_detected() -> None:
+    """Pages that barely match and segments that are mostly inserted are reference noise."""
+    assert page_is_reliable(["correct"] * 4 + ["inserted"] * 6)
+    assert not page_is_reliable(["correct"] * 3 + ["inserted"] * 7)
+    assert not segment_is_reliable(["correct", "inserted", "inserted", "ignore", "misread", "inserted"])
+    assert segment_is_reliable(["inserted", "inserted", "correct"])
+
+
+def test_segments_are_aligned_against_their_own_passage() -> None:
+    """Two blocks read in the opposite order of the reference are both labelled correct."""
+    first_block = "the quick brown fox jumps over the lazy dog today"
+    second_block = "a second block of plain text stands here alone now"
+    book_scorer = BookScorer(ListReference([f"{first_block} {second_block}"]))
+    page_record = {"segments": [{"label": "text", "text": second_block}, {"label": "text", "text": first_block}]}
+    catalog_book = CatalogBook("english-book", "english", "en", Path("scan.pdf"), "transcript",
+                               Path("reference.txt"), 1)
+    page_rows = list(page_examples(catalog_book, book_scorer, page_record, 0))
+    assert [set(page_row["labels"]) for page_row in page_rows] == [{"correct"}, {"correct"}]
+
+
+def test_loops_and_proofread_pages_are_kept() -> None:
+    """A repetition loop or a hand-proofread reference keeps pages and segments the noise filter would drop."""
+    poor_labels = ["correct"] * 2 + ["inserted"] * 8
+    assert not page_is_reliable(poor_labels)
+    assert page_is_reliable(poor_labels, proofread_reference=True)
+    assert page_is_reliable(poor_labels, page_units=["a", "b", "x", "y", "x", "y", "x", "y"])
+    assert segment_is_reliable(["inserted"] * 6, segment_units=["敵"] * 6)
+    assert not segment_is_reliable(["inserted"] * 6, segment_units=list("abcdef"))
+
+
+def test_exported_examples_carry_page_context(tmp_path) -> None:
+    """Exported examples carry the neighbouring segments as context (as pipeline jobs do)."""
+    first_block = "the quick brown fox jumps over the lazy dog today"
+    second_block = "a second block of plain text stands here alone now"
+    book_scorer = BookScorer(ListReference([f"{first_block} {second_block}"]))
+    page_record = {"page": 1, "segments": [{"label": "text", "text": first_block},
+                                           {"label": "text", "text": second_block}]}
+    catalog_book = CatalogBook("english-book", "english", "en", Path("scan.pdf"), "transcript",
+                               Path("reference.txt"), 1)
+    page_rows = list(page_examples(catalog_book, book_scorer, page_record, 0))
+    assert page_rows[0]["context_after"][:2] == ["a", "second"] and "context_before" not in page_rows[0]
+    assert page_rows[1]["context_before"][-1] == "today"
+
+
+def test_rendered_pages_are_labelled_against_their_words(tmp_path) -> None:
+    """The pipeline output of a rendered page is labelled against the exact words of the manifest."""
+    language_directory = tmp_path / "rendered_train" / "english"
+    (language_directory / "conversion").mkdir(parents=True)
+    (language_directory / "manifest.json").write_text(json.dumps(
+        {"language": "english", "pages": [{"book_key": "b", "words": "the modern age went fast".split()}]}))
+    (language_directory / "conversion" / "segments.json").write_text(json.dumps(
+        [{"page": 1, "segments": [{"label": "text", "text": "the rnodern age went fast"}]}]))
+    export_rendered(tmp_path, "train")
+    exported_line = json.loads((tmp_path / "rendered_train.jsonl").read_text().splitlines()[0])
+    assert exported_line["labels"] == ["correct", "misread", "correct", "correct", "correct"]
+    assert exported_line["book_key"] == "rendered-english"

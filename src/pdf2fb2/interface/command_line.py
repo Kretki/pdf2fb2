@@ -118,6 +118,26 @@ def _add_marks_arguments(argument_parser: argparse.ArgumentParser) -> None:
                                  help="fine-tuned token verifier (skipped when it has no config.json)")
     argument_parser.add_argument("--full-proofread", dest="full_proofread", action="store_true",
                                  help="let Qwen3.5 score the whole text even when the token verifier is available")
+    _add_verify_evidence_arguments(argument_parser)
+
+
+def _add_verify_evidence_arguments(argument_parser: argparse.ArgumentParser) -> None:
+    """Register the optional evidence of the token verifier.
+
+    Args:
+        argument_parser: Parser to extend.
+    """
+    argument_parser.add_argument("--no-ocr-confidence", dest="skip_ocr_confidence", action="store_true",
+                                 help="do not ask the OCR model for per-character confidences (verifier evidence)")
+    argument_parser.add_argument("--second-read", dest="second_read", action="store_true",
+                                 help="read every text segment a second time from a larger crop (verifier "
+                                 "evidence; doubles the OCR time)")
+    argument_parser.add_argument("--verify-crops", dest="verify_crops", action="store_true",
+                                 help="send word crops to the verifier (needs a verifier trained with visual_model)")
+    argument_parser.add_argument("--judge", dest="use_judge", action="store_true",
+                                 help="let the vision-language model (Qwen3.5) judge units the verifier is unsure of")
+    argument_parser.add_argument("--judge-model-dir", dest="judge_model_directory", type=parse_existing_directory,
+                                 default=PROOFREAD_MODEL_DIRECTORY, help="vision-language model of the judge")
 
 
 def _add_book_arguments(argument_parser: argparse.ArgumentParser) -> None:

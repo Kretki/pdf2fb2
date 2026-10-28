@@ -7,7 +7,10 @@ dependencies = [
     "torch>=2.13,<3",                          # cu130 wheels: RTX 50-series (sm_120)
     "transformers>=5.19,<6",                   # XLM-RoBERTa token classification, fast tokenizers
     "sentencepiece>=0.2.1,<1",                 # XLM-RoBERTa tokenizer model
+    "protobuf>=5.29,<7",                       # converts the mDeBERTa-v3 SentencePiece model to a fast tokenizer
     "safetensors>=0.6,<1",
+    "pillow>=13,<14",                          # word crops for the image-and-text features
+    "numpy>=2.2,<3",                           # per-unit evidence matrices
     "worker-protocol",
 ]
 

@@ -1,5 +1,6 @@
 """Verification stage: delegates unit labelling of OCR texts to the verifier worker venv."""
 
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,8 +132,30 @@ class VerifyStage:
         Raises:
             WorkerFailedError: If the worker fails or returns a mismatching result.
         """
-        verify_items = tuple(VerifyItem(item_key, tuple(unit_text[:MAX_UNIT_LENGTH] for unit_text in item_units))
-                             for item_key, item_units in unit_lists.items() if item_units)
+        plain_items = [VerifyItem(item_key, tuple(item_units)) for item_key, item_units in unit_lists.items()]
+        return self.label_items(plain_items, work_directory, job_name, stage_progress)
+
+    def label_items(self, verify_items: list[VerifyItem], work_directory: Path, job_name: str,
+                    stage_progress: StageProgress) -> VerifyOutcome:
+        """Probabilities of every unit of items that may carry context, page evidence and crops.
+
+        Args:
+            verify_items: Items (empty ones are skipped; units and context longer than the limit are cut).
+            work_directory: Output directory for the job and result files (crop paths are relative to it).
+            job_name: File stem of the job (result ``<stem>_result.json``).
+            stage_progress: Receives progress.
+
+        Returns:
+            Validated outcome.
+
+        Raises:
+            WorkerFailedError: If the worker fails or returns a mismatching result.
+        """
+        verify_items = tuple(dataclasses.replace(
+            verify_item, item_units=tuple(unit_text[:MAX_UNIT_LENGTH] for unit_text in verify_item.item_units),
+            context_before=tuple(unit_text[:MAX_UNIT_LENGTH] for unit_text in verify_item.context_before),
+            context_after=tuple(unit_text[:MAX_UNIT_LENGTH] for unit_text in verify_item.context_after))
+            for verify_item in verify_items if verify_item.item_units)
         if not verify_items:
             return VerifyOutcome({}, {"misread": 1.0, "inserted": 1.0})
         verify_job = VerifyJob(work_directory.resolve(), self._model_directory.resolve(), self._device_name,

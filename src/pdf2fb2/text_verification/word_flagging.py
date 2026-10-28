@@ -7,8 +7,8 @@ The flow blocks are the exact text the proofreader sends to Qwen3.5. Each block 
 from pathlib import Path
 
 from pdf2fb2.progress.progress_contracts import StageProgress
-from pdf2fb2.text_verification.feedback_loop import UnitLabeler
 from pdf2fb2.text_verification.unit_flags import flag_units
+from pdf2fb2.text_verification.verification_contracts import UnitLabeler
 from pdf2fb2.text_verification.verify_units import verify_units
 
 FLAG_JOB_NAME = "proofread_verify_job"

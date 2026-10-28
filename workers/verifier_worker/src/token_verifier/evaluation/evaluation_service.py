@@ -10,16 +10,11 @@ from collections import defaultdict
 from pathlib import Path
 
 from token_verifier.datasets.example_files import TokenExample, read_examples
+from token_verifier.datasets.verify_texts import VerifyText, text_from_example
 from token_verifier.evaluation.label_metrics import ERROR_CLASSES, class_scores
 from token_verifier.evaluation.threshold_tuning import tune_thresholds
 from token_verifier.inference.unit_prediction import predict_units
-from token_verifier.networks.model_loading import (
-    THRESHOLDS_FILE,
-    LoadedVerifier,
-    load_verifier,
-    read_thresholds,
-    read_window_settings,
-)
+from token_verifier.networks.model_loading import VerifierBundle, load_bundle, read_thresholds, write_thresholds
 from token_verifier.verifier_settings import VerifierSettings
 
 
@@ -45,27 +40,24 @@ def split_examples(data_directory: Path, split_name: str) -> tuple[list[TokenExa
     return synthetic_examples, "synthetic"
 
 
-def predicted_rows(loaded_verifier: LoadedVerifier, token_examples: list[TokenExample],
-                   model_directory: Path, verifier_settings: VerifierSettings) -> list[list[list[float]]]:
-    """Probabilities of every unit of every example.
+def predicted_rows(verifier_bundle: VerifierBundle, token_examples: list[TokenExample],
+                   data_directory: Path) -> list[list[list[float]]]:
+    """Probabilities of every unit of every example (context, evidence and crops of the examples are used).
 
     Args:
-        loaded_verifier: Fine-tuned model.
+        verifier_bundle: Fine-tuned verifier.
         token_examples: Examples.
-        model_directory: Model directory (window size).
-        verifier_settings: Default window size.
+        data_directory: Directory crop paths are relative to.
 
     Returns:
         Per example, per unit: probabilities.
     """
-    window_units, max_tokens = read_window_settings(model_directory, verifier_settings.training_settings.window_units,
-                                                    verifier_settings.training_settings.max_tokens)
-    return predict_units(loaded_verifier, [list(token_example.unit_texts) for token_example in token_examples],
-                         window_units, max_tokens)
+    return predict_units(verifier_bundle, [text_from_example(token_example, data_directory)
+                                           for token_example in token_examples])
 
 
 def run_tuning(verifier_settings: VerifierSettings) -> dict[str, float]:
-    """Tune and store the thresholds of the fine-tuned model.
+    """Tune and store the thresholds of the fine-tuned model (or ensemble).
 
     Usage:
         ``python -m token_verifier tune`` after ``train`` (``train`` already tunes; rerun after new valid data).
@@ -77,22 +69,23 @@ def run_tuning(verifier_settings: VerifierSettings) -> dict[str, float]:
         The thresholds written to ``thresholds.json``.
     """
     model_directory = verifier_settings.path_settings.output_model
-    loaded_verifier = load_verifier(model_directory, verifier_settings.training_settings.device_name)
-    token_examples, _ = split_examples(verifier_settings.path_settings.data_directory, "valid")
-    probability_lists = predicted_rows(loaded_verifier, token_examples, model_directory, verifier_settings)
+    data_directory = verifier_settings.path_settings.data_directory
+    verifier_bundle = load_bundle(model_directory, verifier_settings.training_settings.device_name)
+    token_examples, _ = split_examples(data_directory, "valid")
+    probability_lists = predicted_rows(verifier_bundle, token_examples, data_directory)
     class_thresholds = tune_thresholds(
         [unit_label for token_example in token_examples for unit_label in token_example.unit_labels],
         [probability_row for probability_list in probability_lists for probability_row in probability_list])
-    (model_directory / THRESHOLDS_FILE).write_text(json.dumps(class_thresholds, indent=1), encoding="utf-8")
+    write_thresholds(model_directory, class_thresholds)
     return class_thresholds
 
 
-def grouped_scores(token_examples: list[TokenExample], probability_lists: list[list[list[float]]],
-                   class_thresholds: dict[str, float]) -> dict[str, dict]:
-    """Scores per language and over all examples.
+def grouped_texts_scores(text_pairs: list[tuple[VerifyText, str]], probability_lists: list[list[list[float]]],
+                         class_thresholds: dict[str, float]) -> dict[str, dict]:
+    """Scores per language and over all texts.
 
     Args:
-        token_examples: Examples.
+        text_pairs: Labelled texts with their language names.
         probability_lists: Their probabilities.
         class_thresholds: Decision thresholds.
 
@@ -100,9 +93,9 @@ def grouped_scores(token_examples: list[TokenExample], probability_lists: list[l
         ``{group: {class: summary}}`` with group ``ALL`` plus one per language.
     """
     grouped_rows: dict[str, tuple[list[str], list[list[float]]]] = defaultdict(lambda: ([], []))
-    for token_example, probability_list in zip(token_examples, probability_lists, strict=True):
-        for group_name in ("ALL", token_example.language_name):
-            grouped_rows[group_name][0].extend(token_example.unit_labels)
+    for (verify_text, language_name), probability_list in zip(text_pairs, probability_lists, strict=True):
+        for group_name in ("ALL", language_name):
+            grouped_rows[group_name][0].extend(verify_text.unit_labels)
             grouped_rows[group_name][1].extend(probability_list)
     return {group_name: {class_name: class_scores(gold_labels, probability_rows, class_name,
                                                   class_thresholds[class_name]).score_summary()
@@ -116,7 +109,7 @@ def markdown_scores(split_name: str, data_origin: str, score_groups: dict[str, d
     Args:
         split_name: Evaluated split.
         data_origin: ``aligned`` or ``synthetic``.
-        score_groups: Result of ``grouped_scores``.
+        score_groups: Result of ``grouped_texts_scores``.
 
     Returns:
         Markdown text.
@@ -144,11 +137,14 @@ def run_evaluation(verifier_settings: VerifierSettings, split_name: str) -> Path
         Path of the Markdown report.
     """
     model_directory = verifier_settings.path_settings.output_model
-    loaded_verifier = load_verifier(model_directory, verifier_settings.training_settings.device_name)
-    token_examples, data_origin = split_examples(verifier_settings.path_settings.data_directory, split_name)
-    score_groups = grouped_scores(token_examples,
-                                  predicted_rows(loaded_verifier, token_examples, model_directory, verifier_settings),
-                                  read_thresholds(model_directory))
+    data_directory = verifier_settings.path_settings.data_directory
+    verifier_bundle = load_bundle(model_directory, verifier_settings.training_settings.device_name)
+    token_examples, data_origin = split_examples(data_directory, split_name)
+    text_pairs = [(text_from_example(token_example, data_directory), token_example.language_name)
+                  for token_example in token_examples]
+    score_groups = grouped_texts_scores(text_pairs, predict_units(verifier_bundle, [text_entry for text_entry, _
+                                                                                    in text_pairs]),
+                                        read_thresholds(model_directory))
     reports_directory = verifier_settings.path_settings.reports_directory
     reports_directory.mkdir(parents=True, exist_ok=True)
     (reports_directory / f"verifier_{split_name}.json").write_text(json.dumps(

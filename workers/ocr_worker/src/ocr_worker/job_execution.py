@@ -5,7 +5,8 @@ from functools import partial
 
 from PIL import Image
 
-from ocr_worker.engine_protocol import EngineUnavailableError, OcrEngine
+from ocr_worker.engine_protocol import ConfidenceOcrEngine, EngineUnavailableError, OcrEngine
+from ocr_worker.token_confidence import rounded_logprobs
 from worker_protocol.json_files import append_json_line
 from worker_protocol.ocr_job_schema import OcrCropItem, OcrJobSpec
 from worker_protocol.progress_events import OCR_PROGRESS_EVENT, emit_progress_event
@@ -23,7 +24,8 @@ def recognize_item(ocr_request: OcrJobSpec, ocr_engine: OcrEngine, ocr_item: Ocr
         ocr_item: Crop to read.
 
     Returns:
-        Result record ``{"item_key": str, "text": str, "error": str | None}``.
+        Result record ``{"item_key": str, "text": str, "error": str | None}``, plus ``char_logprobs`` (one
+        log-probability per character) when the job asks for confidences and the engine can give them.
 
     Raises:
         EngineUnavailableError: If the engine cannot read any further crop (stops the job).
@@ -31,6 +33,10 @@ def recognize_item(ocr_request: OcrJobSpec, ocr_engine: OcrEngine, ocr_item: Ocr
     try:
         with Image.open(ocr_request.resolve_inside(ocr_item.image_file)) as crop_file:
             crop_image = crop_file.convert("RGB")
+        if ocr_request.return_confidences and isinstance(ocr_engine, ConfidenceOcrEngine):
+            recognized = ocr_engine.recognize_with_confidence(crop_image, ocr_item.max_new_tokens)
+            return {"item_key": ocr_item.item_key, "text": recognized.recognized_text, "error": None,
+                    "char_logprobs": rounded_logprobs(recognized.char_logprobs)}
         recognized_text = ocr_engine.recognize_image(crop_image, ocr_item.max_new_tokens)
         return {"item_key": ocr_item.item_key, "text": recognized_text, "error": None}
     except EngineUnavailableError:

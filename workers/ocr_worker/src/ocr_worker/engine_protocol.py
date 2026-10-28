@@ -1,8 +1,10 @@
 """Abstraction every OCR backend implements."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from PIL import Image
+
+from ocr_worker.token_confidence import RecognizedText
 
 
 class EngineUnavailableError(RuntimeError):
@@ -41,5 +43,29 @@ class OcrEngine(Protocol):
         Raises:
             EngineUnavailableError: If the engine cannot serve any further crop.
             Exception: Any other error fails only this crop.
+        """
+        ...
+
+
+@runtime_checkable
+class ConfidenceOcrEngine(Protocol):
+    """Reads a crop and reports how sure the model was of every character.
+
+    Usage:
+        Optional capability: the job runner uses it when the job asks for confidences and the engine has it.
+    """
+
+    def recognize_with_confidence(self, crop_image: Image.Image, max_new_tokens: int) -> RecognizedText:
+        """Read the text in an image crop with per-character log-probabilities.
+
+        Args:
+            crop_image: RGB crop of one layout segment.
+            max_new_tokens: Generation budget, 1..32768.
+
+        Returns:
+            Text and one log-probability per character.
+
+        Raises:
+            EngineUnavailableError: If the engine cannot serve any further crop.
         """
         ...

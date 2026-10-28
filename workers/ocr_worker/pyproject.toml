@@ -8,7 +8,8 @@ dependencies = [
     "torchvision>=0.28,<1",   # matches torch 2.13; fast image processors used by the Qianfan-OCR processor
     "transformers>=5.0,<6",   # Qianfan-OCR (model_type "qianfan_ocr") is loaded natively, no remote code
     "accelerate>=1.10,<2",
-    "pillow>=11,<13",
+    "pillow>=11,<13; python_version < '3.11'",
+    "pillow>=13,<14; python_version >= '3.11'",  # 13.0.0 fixes PYSEC-2026-4326..4340
     "worker-protocol",
 ]
 

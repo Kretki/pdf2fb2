@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pdf2fb2.fb2_output.text_markup import clean_ocr_text, normalize_ellipsis
+from pdf2fb2.model_stages.ocr_confidence_cache import CONFIDENCE_CACHE_FILE, OcrConfidenceCache
 from pdf2fb2.model_stages.ocr_crop_writer import OcrCropWriter, PendingCrop
 from pdf2fb2.model_stages.ocr_text_cache import OcrTextCache, build_segment_key
 from pdf2fb2.progress.progress_contracts import StageProgress
@@ -32,6 +33,7 @@ class OcrBackendSettings:
         server_model: Model name exposed by the server (http backend).
         parallel_requests: Concurrent requests, 1..64 (http backend).
         prompt_text: Instruction sent with every crop.
+        collect_confidences: Ask the worker for per-character log-probabilities (verifier evidence).
     """
 
     backend_name: str
@@ -41,23 +43,30 @@ class OcrBackendSettings:
     server_model: str | None
     parallel_requests: int
     prompt_text: str = QIANFAN_PROMPT
+    collect_confidences: bool = True
 
 
-def apply_cached_texts(page_records: list[dict], text_cache: OcrTextCache) -> None:
-    """Copy cached OCR texts into the segments, with typeset ellipses normalised.
+def apply_cached_texts(page_records: list[dict], text_cache: OcrTextCache,
+                       confidence_cache: OcrConfidenceCache | None = None) -> None:
+    """Copy cached OCR texts (and confidences, when cached) into the segments, typeset ellipses normalised.
 
     Args:
-        page_records: Page records (segments mutated: ``text`` is set).
+        page_records: Page records (segments mutated: ``text`` and, when known, ``ocr_confidence`` are set).
         text_cache: Cache with OCR results.
+        confidence_cache: Cache with raw outputs and per-character log-probabilities, or None.
 
     Returns:
         None.
     """
     for page_record in page_records:
         for page_segment in page_record["segments"]:
-            if requires_ocr(page_segment["label"]):
-                page_segment["text"] = normalize_ellipsis(
-                    text_cache.lookup_text(build_segment_key(page_record, page_segment)))
+            if not requires_ocr(page_segment["label"]):
+                continue
+            segment_key = build_segment_key(page_record, page_segment)
+            page_segment["text"] = normalize_ellipsis(text_cache.lookup_text(segment_key))
+            confidence_entry = None if confidence_cache is None else confidence_cache.lookup_entry(segment_key)
+            if confidence_entry is not None:
+                page_segment["ocr_confidence"] = confidence_entry
 
 
 class OcrProgressRelay:
@@ -150,20 +159,21 @@ class OcrStage:
             WorkerFailedError: If the worker crashes (partial results are still cached).
         """
         text_cache = OcrTextCache(work_directory / OCR_CACHE_FILE)
+        confidence_cache = OcrConfidenceCache(work_directory / CONFIDENCE_CACHE_FILE)
         crop_writer = OcrCropWriter(work_directory, text_cache, len(page_records))
         pending_crops = crop_writer.write_pending_crops(page_records, stage_progress)
         if pending_crops:
-            self._run_worker(pending_crops, work_directory, text_cache, stage_progress)
-        apply_cached_texts(page_records, text_cache)
+            self._run_worker(pending_crops, work_directory, (text_cache, confidence_cache), stage_progress)
+        apply_cached_texts(page_records, text_cache, confidence_cache)
 
-    def _run_worker(self, pending_crops: list[PendingCrop], work_directory: Path, text_cache: OcrTextCache,
-                    stage_progress: StageProgress) -> None:
+    def _run_worker(self, pending_crops: list[PendingCrop], work_directory: Path,
+                    result_caches: tuple[OcrTextCache, OcrConfidenceCache], stage_progress: StageProgress) -> None:
         """Write the job, run the worker and merge its results into the cache.
 
         Args:
             pending_crops: Crops to read, in job order.
             work_directory: Output directory.
-            text_cache: Cache that receives the results (saved even if the worker fails).
+            result_caches: Text and confidence caches that receive the results (saved even if the worker fails).
             stage_progress: Receives per-crop progress and failure messages.
 
         Returns:
@@ -182,7 +192,7 @@ class OcrStage:
             worker_run = self._worker_launcher.launch_worker(self._worker_environment, job_file,
                                                              OcrProgressRelay(stage_progress, pending_crops))
         finally:
-            _merge_results(result_path, text_cache, stage_progress)
+            _merge_results(result_path, result_caches, stage_progress)
         if worker_run.exit_code not in ACCEPTED_EXIT_CODES:
             raise WorkerFailedError(describe_worker_failure("OCR worker", worker_run))
 
@@ -212,22 +222,25 @@ class OcrStage:
             prompt_text=backend_settings.prompt_text,
             ocr_items=tuple(pending_items),
             result_file=OCR_RESULT_FILE,
+            return_confidences=backend_settings.collect_confidences,
         )
         ocr_request.validate_backend_fields()
         return ocr_request
 
 
-def _merge_results(result_path: Path, text_cache: OcrTextCache, stage_progress: StageProgress) -> None:
-    """Move worker results into the cache and persist it; report failed crops.
+def _merge_results(result_path: Path, result_caches: tuple[OcrTextCache, OcrConfidenceCache],
+                   stage_progress: StageProgress) -> None:
+    """Move worker results into the caches and persist them; report failed crops.
 
     Args:
         result_path: JSON-lines result file written by the worker.
-        text_cache: Cache that receives successful results.
+        result_caches: Text cache and confidence cache that receive successful results.
         stage_progress: Receives one message per failed crop.
 
     Returns:
         None. Failed crops are not cached, so the next run retries them.
     """
+    text_cache, confidence_cache = result_caches
     for result_record in read_json_lines(result_path):
         item_key, item_text = result_record.get("item_key"), result_record.get("text")
         if not isinstance(item_key, str):
@@ -236,4 +249,7 @@ def _merge_results(result_path: Path, text_cache: OcrTextCache, stage_progress: 
             stage_progress.report_message(f"! OCR failed for segment {item_key}: {result_record['error']}")
         elif isinstance(item_text, str):
             text_cache.store_text(item_key, clean_ocr_text(item_text))
+            if isinstance(result_record.get("char_logprobs"), list):
+                confidence_cache.store_entry(item_key, item_text, result_record["char_logprobs"])
     text_cache.save_to_disk()
+    confidence_cache.save_to_disk()

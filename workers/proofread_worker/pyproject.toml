@@ -10,6 +10,7 @@ dependencies = [
     "bitsandbytes>=0.49,<1",                   # 4-bit NF4: the 9B model in ~6 GB of VRAM
     "flash-linear-attention>=0.4,<1",          # Triton kernels of the Gated DeltaNet layers
     "safetensors>=0.6,<1",
+    "pillow>=13,<14",                          # line crops of the vision-language judge
     "worker-protocol",
 ]
 

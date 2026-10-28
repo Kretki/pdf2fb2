@@ -5,8 +5,11 @@ from pathlib import Path
 from pdf2fb2.model_stages.verify_stage import VerifyOutcome
 from pdf2fb2.text_verification.feedback_loop import VerificationFeedback
 from pdf2fb2.text_verification.text_splicing import TextEdit, apply_edits
+from pdf2fb2.text_verification.uncertain_units import is_uncertain, judged_row
+from pdf2fb2.text_verification.unit_evidence import confidence_columns, page_contexts, reread_columns
 from pdf2fb2.text_verification.unit_flags import error_mass, flag_units
 from pdf2fb2.text_verification.verify_units import verify_units
+from worker_protocol.verify_job_schema import VerifyItem
 
 THRESHOLDS = {"misread": 0.5, "inserted": 0.5}
 BAD_WORDS = {"rnodern": [0.1, 0.9, 0.0], "HALLUCINATEDCONTINUATION": [0.1, 0.0, 0.9]}
@@ -44,6 +47,24 @@ class FakeLabeler:
     def __init__(self) -> None:
         """Start without jobs."""
         self.job_names: list[str] = []
+        self.job_items: list[list[VerifyItem]] = []
+
+    def label_items(self, verify_items: list[VerifyItem], work_directory: Path, job_name: str,
+                    stage_progress: SilentProgress) -> VerifyOutcome:
+        """Probabilities of items (recorded) from the ``BAD_WORDS`` table.
+
+        Args:
+            verify_items: Items.
+            work_directory: Unused.
+            job_name: Recorded.
+            stage_progress: Unused.
+
+        Returns:
+            Outcome with the test thresholds.
+        """
+        self.job_items.append(list(verify_items))
+        return self.label_units({verify_item.item_key: list(verify_item.item_units) for verify_item in verify_items},
+                                work_directory, job_name, stage_progress)
 
     def label_units(self, unit_lists: dict[str, list[str]], work_directory: Path, job_name: str,
                     stage_progress: SilentProgress) -> VerifyOutcome:
@@ -146,3 +167,39 @@ def test_feedback_rereads_misread_line_and_deletes_unprinted_text(tmp_path) -> N
     assert page_segment["pre_verify_text"].startswith("the rnodern")
     assert verify_summary["changed_segments"] == 1 and verify_summary["deleted_units"] == 1
     assert (tmp_path / "verify_report.json").exists()
+    first_item = fake_labeler.job_items[0][0]
+    assert first_item.unit_features["box_width_ratio"][3] < 0.5 < first_item.unit_features["box_width_ratio"][0]
+    assert sorted(verify_item.item_key for verify_item in fake_labeler.job_items[1]) == ["1:0|candidate",
+                                                                                        "1:0|original"]
+
+
+def test_unit_evidence_maps_confidence_and_second_read() -> None:
+    """Confidences follow the raw text through cleaning; a different second read marks the unit."""
+    segment_text = "the modern age"
+    segment_units = verify_units(segment_text)
+    confidence = {"raw_text": "**the modern age**", "char_logprobs": [0.0, 0.0] + [-0.1] * 4 + [-3.0] * 6 +
+                  [-0.2] * 4 + [0.0, 0.0]}
+    confidence_cols = confidence_columns(segment_text, segment_units, confidence)
+    assert confidence_cols["ocr_min_logprob"][1] == -3.0 and confidence_cols["ocr_min_logprob"][0] == -0.1
+    assert reread_columns(segment_units, "the madern age")["reread_disagrees"] == (0.0, 1.0, 0.0)
+    assert page_contexts([["a", "b"], ["c"], ["d", "e"]]) == [((), ("c", "d", "e")), (("a", "b"), ("d", "e")),
+                                                             (("a", "b", "c"), ())]
+
+
+def test_judge_blends_uncertain_rows() -> None:
+    """The judge's error probability is averaged with the verifier's, keeping the misread/inserted split."""
+    assert is_uncertain([0.6, 0.3, 0.1], (0.15, 0.6)) and not is_uncertain([0.95, 0.03, 0.02], (0.15, 0.6))
+    combined_row = judged_row([0.6, 0.3, 0.1], 1.0)
+    assert abs(combined_row[0] - 0.3) < 1e-9 and abs(combined_row[1] - 0.525) < 1e-9
+
+
+def test_temporary_images_are_removed_after_verification(tmp_path) -> None:
+    """Crop directories go away when verification ends; the second read's text cache stays."""
+    for relative_name in ("verify_crops", "judge_lines", "second_read/ocr_crops"):
+        (tmp_path / relative_name).mkdir(parents=True)
+        (tmp_path / relative_name / "crop.png").write_bytes(b"png")
+    (tmp_path / "second_read" / "ocr_cache.json").write_text("{}")
+    VerificationFeedback(FakeLabeler(), FakeReader()).verify_segments(sample_pages(), tmp_path, SilentProgress())
+    assert not any((tmp_path / relative_name).exists()
+                   for relative_name in ("verify_crops", "judge_lines", "second_read/ocr_crops"))
+    assert (tmp_path / "second_read" / "ocr_cache.json").exists() and (tmp_path / "verify_report.json").exists()

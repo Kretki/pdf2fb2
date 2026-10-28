@@ -30,6 +30,7 @@ class CatalogBook:
         reference_kind: ``djvu_xml``, ``ndl_zip`` or ``transcript``.
         reference_path: Absolute path of the reference text.
         page_count: Verified page count of the scan.
+        text_quality: Catalog ``text_quality`` (``hand_proofread_same_edition`` marks proofread references).
     """
 
     book_key: str
@@ -39,6 +40,16 @@ class CatalogBook:
     reference_kind: str
     reference_path: Path
     page_count: int
+    text_quality: str = ""
+
+    @property
+    def is_proofread(self) -> bool:
+        """Tell whether the reference was proofread by hand (its labels are trusted as they are).
+
+        Returns:
+            True for hand-proofread references.
+        """
+        return "hand_proofread" in self.text_quality
 
 
 def corpus_path(corpus_root: Path, relative_text: str) -> Path:
@@ -101,7 +112,7 @@ def catalog_book(corpus_root: Path, catalog_row: dict) -> CatalogBook:
                        language_code=catalog_row["language_code"],
                        scan_path=corpus_path(corpus_root, catalog_row["image_pdf_path"]),
                        reference_kind=reference_kind, reference_path=corpus_path(corpus_root, reference_text),
-                       page_count=page_count)
+                       page_count=page_count, text_quality=catalog_row.get("text_quality") or "")
 
 
 def read_correct_books(corpus_root: Path) -> list[CatalogBook]:

@@ -1,6 +1,7 @@
 """OCR job description (orchestrator -> ocr_worker): segment crops to read.
 
-Result: JSON-lines file, one ``{"item_key": str, "text": str, "error": str | None}`` per crop.
+Result: JSON-lines file, one ``{"item_key": str, "text": str, "error": str | None}`` per crop, plus
+``"char_logprobs": [float, ...]`` (one log-probability per character of ``text``) when ``return_confidences`` is set.
 All image and result paths are relative to ``work_directory``.
 """
 
@@ -98,6 +99,7 @@ class OcrJobSpec:
         prompt_text: Instruction sent with every crop.
         ocr_items: Crops to read.
         result_file: Relative path of the JSON-lines result file.
+        return_confidences: Ask for ``char_logprobs`` (per-character log-probabilities) in every record.
     """
 
     work_directory: Path
@@ -110,6 +112,7 @@ class OcrJobSpec:
     prompt_text: str
     ocr_items: tuple[OcrCropItem, ...]
     result_file: str
+    return_confidences: bool = False
 
     def to_payload(self) -> dict:
         """Serialise the job to a JSON-compatible object.
@@ -131,6 +134,7 @@ class OcrJobSpec:
             "prompt_text": self.prompt_text,
             "ocr_items": [ocr_item.to_payload() for ocr_item in self.ocr_items],
             "result_file": self.result_file,
+            "return_confidences": self.return_confidences,
         }
 
     @classmethod
@@ -163,6 +167,7 @@ class OcrJobSpec:
             prompt_text=require_string(job_payload, "prompt_text", MAX_PROMPT_LENGTH),
             ocr_items=tuple(OcrCropItem.from_payload(item_entry, work_directory) for item_entry in item_entries),
             result_file=checked_relative_path(work_directory, require_string(job_payload, "result_file")),
+            return_confidences=job_payload.get("return_confidences") is True,
         )
         ocr_request.validate_backend_fields()
         return ocr_request

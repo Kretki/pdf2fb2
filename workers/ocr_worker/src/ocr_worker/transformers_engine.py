@@ -8,6 +8,7 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 from ocr_worker.cuda_memory_guard import CudaMemoryGuard
+from ocr_worker.token_confidence import RecognizedText, incremental_char_logprobs
 
 
 class TransformersOcrEngine:
@@ -69,6 +70,65 @@ class TransformersOcrEngine:
         """
         return self._memory_guard.run_guarded(partial(self._generate_text, crop_image, max_new_tokens))
 
+    def recognize_with_confidence(self, crop_image: Image.Image, max_new_tokens: int) -> RecognizedText:
+        """Read the text in an image crop with per-character log-probabilities.
+
+        Usage:
+            Called by the job runner when the job asks for confidences.
+
+        Args:
+            crop_image: RGB crop of one layout segment.
+            max_new_tokens: Generation budget, 1..32768.
+
+        Returns:
+            Text and one log-probability per character.
+
+        Raises:
+            torch.cuda.OutOfMemoryError: If the crop still runs out of memory after a cache flush.
+            EngineUnavailableError: If several crops in a row ran out of memory.
+        """
+        return self._memory_guard.run_guarded(partial(self._generate_scored, crop_image, max_new_tokens))
+
+    def _model_inputs(self, crop_image: Image.Image) -> dict:
+        """Chat-template inputs of one crop on the model device.
+
+        Args:
+            crop_image: RGB crop.
+
+        Returns:
+            Model inputs.
+        """
+        chat_messages = [{"role": "user", "content": [
+            {"type": "image", "image": crop_image}, {"type": "text", "text": self._prompt_text}]}]
+        return self._processor.apply_chat_template(
+            chat_messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
+        ).to(self._ocr_model.device)
+
+    def _generate_scored(self, crop_image: Image.Image, max_new_tokens: int) -> RecognizedText:
+        """Run one greedy generation that also returns the log-probability of every generated token.
+
+        Args:
+            crop_image: RGB crop of one layout segment.
+            max_new_tokens: Generation budget, 1..32768.
+
+        Returns:
+            Decoded text and per-character log-probabilities.
+
+        Raises:
+            torch.cuda.OutOfMemoryError: If the device cannot hold the request.
+        """
+        model_inputs = self._model_inputs(crop_image)
+        with torch.no_grad():
+            generation = self._ocr_model.generate(**model_inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                                                  output_scores=True, return_dict_in_generate=True)
+            token_logprobs = self._ocr_model.compute_transition_scores(
+                generation.sequences, generation.scores, normalize_logits=True)[0].float().cpu().tolist()
+        generated_ids = generation.sequences[0, model_inputs["input_ids"].shape[1]:].tolist()
+        decoded_text, char_logprobs = incremental_char_logprobs(
+            len(generated_ids), lambda prefix_length: self._processor.tokenizer.decode(
+                generated_ids[:prefix_length], skip_special_tokens=True), token_logprobs)
+        return RecognizedText(decoded_text, tuple(char_logprobs))
+
     def _generate_text(self, crop_image: Image.Image, max_new_tokens: int) -> str:
         """Run one greedy generation for a crop.
 
@@ -82,11 +142,7 @@ class TransformersOcrEngine:
         Raises:
             torch.cuda.OutOfMemoryError: If the device cannot hold the request.
         """
-        chat_messages = [{"role": "user", "content": [
-            {"type": "image", "image": crop_image}, {"type": "text", "text": self._prompt_text}]}]
-        model_inputs = self._processor.apply_chat_template(
-            chat_messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt"
-        ).to(self._ocr_model.device)
+        model_inputs = self._model_inputs(crop_image)
         with torch.no_grad():
             output_ids = self._ocr_model.generate(**model_inputs, max_new_tokens=max_new_tokens, do_sample=False)
         prompt_length = model_inputs["input_ids"].shape[1]

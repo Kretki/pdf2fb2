@@ -1,163 +1,108 @@
-"""``train`` command: fine-tune the base encoder on synthetic and real examples and keep the best epoch.
+"""``train`` command: fine-tune the base encoder (one model or an ensemble of seeds) and keep the best epoch.
 
-Training data: ``synthetic_train.jsonl`` (all catalog languages, balanced at export) plus
-``aligned_train.jsonl`` (real pipeline output of all languages, repeated ``real_repeat`` times and oversampled
-per language towards the language with most examples, by at most ``language_balance_cap``).
-Selection data: ``aligned_valid.jsonl`` when it exists, else ``synthetic_valid.jsonl``.
-After every epoch the thresholds are tuned on the selection data and the epoch with the best mean F1 of the two
-error classes is saved to ``output_model`` (weights, tokenizer, ``thresholds.json``, ``window_settings.json``).
+Every member gets a fresh head on the pretrained backbone (word embeddings frozen when configured), runs the
+two-stage schedule of ``training_stages`` and saves its best (EMA) weights with thresholds tuned on the
+selection data. With ``ensemble_members > 1`` the members go to ``member_<n>/`` sub-directories, ``ensemble.json``
+lists them and the thresholds of the averaged ensemble are tuned at the end.
 """
 
-import json
-import math
 import random
-from collections import defaultdict
+import shutil
 from pathlib import Path
 
 import torch
-from transformers import get_linear_schedule_with_warmup
 
-from token_verifier.datasets.example_files import TokenExample, read_examples
-from token_verifier.datasets.token_encoding import training_windows
-from token_verifier.evaluation.label_metrics import ERROR_CLASSES, class_scores
-from token_verifier.evaluation.threshold_tuning import tune_thresholds
-from token_verifier.inference.unit_prediction import predict_units
+from token_verifier.evaluation.evaluation_service import run_tuning
 from token_verifier.networks.model_loading import (
-    THRESHOLDS_FILE,
-    WINDOW_SETTINGS_FILE,
-    LoadedVerifier,
-    load_verifier,
+    ENSEMBLE_FILE,
+    EvidenceSources,
+    WindowShape,
+    build_assembler,
+    create_verifier,
+    save_verifier,
+    torch_device_of,
+    write_ensemble,
+    write_thresholds,
 )
-from token_verifier.training.training_loop import OptimizerState, train_epoch
-from token_verifier.verifier_settings import TrainingSettings, VerifierSettings
+from token_verifier.training.parameter_groups import freeze_word_embeddings
+from token_verifier.training.training_data import training_corpus
+from token_verifier.training.training_stages import MemberRun, fit_member
+from token_verifier.verifier_settings import VerifierSettings
 
 
-def language_balanced(token_examples: list[TokenExample], balance_cap: int) -> list[TokenExample]:
-    """Oversample the languages with few examples towards the largest one.
-
-    Args:
-        token_examples: Examples of all languages.
-        balance_cap: Largest repetition factor of one language.
-
-    Returns:
-        Examples with every language repeated ``min(cap, ceil(largest / own count))`` times.
-    """
-    examples_by_language: dict[str, list[TokenExample]] = defaultdict(list)
-    for token_example in token_examples:
-        examples_by_language[token_example.language_name].append(token_example)
-    largest_count = max((len(language_examples) for language_examples in examples_by_language.values()), default=0)
-    return [token_example for language_examples in examples_by_language.values()
-            for token_example in language_examples * min(balance_cap,
-                                                          math.ceil(largest_count / len(language_examples)))]
-
-
-def training_examples(data_directory: Path, training_settings: TrainingSettings) -> list[TokenExample]:
-    """Synthetic and repeated, language-balanced real training examples.
+def evidence_sources(verifier_settings: VerifierSettings) -> EvidenceSources:
+    """Evidence provider directories of the settings.
 
     Args:
-        data_directory: Directory of the JSONL files.
-        training_settings: ``real_repeat`` and ``language_balance_cap``.
+        verifier_settings: All settings.
 
     Returns:
-        Examples.
-
-    Raises:
-        FileNotFoundError: If there is no training data at all.
+        Language-model and visual model directories (None when disabled).
     """
-    real_examples = language_balanced(read_examples(data_directory / "aligned_train.jsonl"),
-                                      training_settings.language_balance_cap)
-    collected_examples = read_examples(data_directory / "synthetic_train.jsonl") + \
-        real_examples * training_settings.real_repeat
-    if not collected_examples:
-        raise FileNotFoundError(f"No synthetic_train.jsonl / aligned_train.jsonl in {data_directory}.")
-    return collected_examples
+    path_settings = verifier_settings.path_settings
+    return EvidenceSources(path_settings.language_model, path_settings.visual_model)
 
 
-def selection_examples(data_directory: Path) -> list[TokenExample]:
-    """Examples used to pick the best epoch and its thresholds.
+def window_shape_of(verifier_settings: VerifierSettings) -> WindowShape:
+    """Window settings of the settings.
 
     Args:
-        data_directory: Directory of the JSONL files.
+        verifier_settings: All settings.
 
     Returns:
-        Real validation output when available, else synthetic validation examples.
+        Window shape.
     """
-    return read_examples(data_directory / "aligned_valid.jsonl") or \
-        read_examples(data_directory / "synthetic_valid.jsonl")
+    training_settings = verifier_settings.training_settings
+    return WindowShape(training_settings.window_units, training_settings.max_tokens, training_settings.context_units)
 
 
-def optimizer_for(loaded_verifier: LoadedVerifier, training_settings: TrainingSettings,
-                  update_count: int) -> OptimizerState:
-    """AdamW, warm-up schedule and weighted loss.
+def train_member(verifier_settings: VerifierSettings, output_directory: Path, random_seed: int) -> float:
+    """Train one model and save its best weights.
 
     Args:
-        loaded_verifier: Model to train.
-        training_settings: Hyper-parameters.
-        update_count: Optimizer updates over all epochs.
+        verifier_settings: All settings.
+        output_directory: Where the member is saved.
+        random_seed: Seed of initialisation, shuffling and evidence dropout.
 
     Returns:
-        Optimizer state.
+        Best validation mean F1.
     """
-    weight_optimizer = torch.optim.AdamW(loaded_verifier.encoder_model.parameters(),
-                                         lr=training_settings.learning_rate,
-                                         weight_decay=training_settings.weight_decay)
-    rate_schedule = get_linear_schedule_with_warmup(weight_optimizer,
-                                                    int(update_count * training_settings.warmup_ratio), update_count)
-    class_weights = torch.tensor(training_settings.class_weights, device=loaded_verifier.torch_device)
-    return OptimizerState(weight_optimizer, rate_schedule, torch.nn.CrossEntropyLoss(weight=class_weights))
+    training_settings = verifier_settings.training_settings
+    torch.manual_seed(random_seed)
+    torch_device = torch_device_of(training_settings.device_name)
+    evidence_dirs = evidence_sources(verifier_settings)
+    feature_assembler = build_assembler(evidence_dirs, torch_device, training_settings.evidence_dropout, random_seed)
+    loaded_verifier = create_verifier(verifier_settings.path_settings.base_model, torch_device, feature_assembler,
+                                      training_settings.backbone_kind)
+    if training_settings.freeze_word_embeddings:
+        freeze_word_embeddings(loaded_verifier.backbone_adapter.encoder_module)
+    training_corpus_value = training_corpus(verifier_settings.path_settings.data_directory,
+                                            loaded_verifier.backbone_adapter, feature_assembler, training_settings)
+    window_shape = window_shape_of(verifier_settings)
 
+    def save_best(best_weights: object, class_thresholds: dict[str, float]) -> None:
+        """Save the best weights and their thresholds.
 
-def selection_score(loaded_verifier: LoadedVerifier, validation_examples: list[TokenExample],
-                    training_settings: TrainingSettings) -> tuple[float, dict[str, float]]:
-    """Mean F1 of the error classes at tuned thresholds.
+        Args:
+            best_weights: Verifier with the best (EMA) weights.
+            class_thresholds: Thresholds tuned for them.
 
-    Args:
-        loaded_verifier: Model after an epoch.
-        validation_examples: Selection examples.
-        training_settings: Window size.
+        Returns:
+            None.
+        """
+        save_verifier(best_weights, output_directory, evidence_dirs, window_shape)
+        write_thresholds(output_directory, class_thresholds)
 
-    Returns:
-        ``(mean F1, thresholds)``.
-    """
-    probability_lists = predict_units(loaded_verifier, [list(token_example.unit_texts)
-                                                        for token_example in validation_examples],
-                                      training_settings.window_units, training_settings.max_tokens)
-    gold_labels = [unit_label for token_example in validation_examples for unit_label in token_example.unit_labels]
-    probability_rows = [probability_row for probability_list in probability_lists
-                        for probability_row in probability_list]
-    class_thresholds = tune_thresholds(gold_labels, probability_rows)
-    f1_values = [class_scores(gold_labels, probability_rows, class_name,
-                              class_thresholds[class_name]).score_summary()["f1"]
-                 for class_name in ERROR_CLASSES]
-    return sum(f1_values) / len(f1_values), class_thresholds
-
-
-def save_verifier(loaded_verifier: LoadedVerifier, output_directory: Path, class_thresholds: dict[str, float],
-                  training_settings: TrainingSettings) -> None:
-    """Write the fine-tuned model with its thresholds and window size.
-
-    Args:
-        loaded_verifier: Model to save.
-        output_directory: ``models/token_verifier``.
-        class_thresholds: Tuned thresholds.
-        training_settings: Window size.
-
-    Returns:
-        None.
-    """
-    output_directory.mkdir(parents=True, exist_ok=True)
-    loaded_verifier.encoder_model.save_pretrained(str(output_directory))
-    loaded_verifier.text_tokenizer.save_pretrained(str(output_directory))
-    (output_directory / THRESHOLDS_FILE).write_text(json.dumps(class_thresholds, indent=1), encoding="utf-8")
-    (output_directory / WINDOW_SETTINGS_FILE).write_text(json.dumps(
-        {"window_units": training_settings.window_units, "max_tokens": training_settings.max_tokens}), encoding="utf-8")
+    member_run = MemberRun(training_corpus_value, training_settings, feature_assembler, window_shape, save_best,
+                           random.Random(random_seed), None)  # nosec B311  # noqa: S311 - shuffling, not cryptography
+    return fit_member(loaded_verifier, member_run)
 
 
 def run_training(verifier_settings: VerifierSettings) -> Path:
-    """Fine-tune and save the best epoch.
+    """Fine-tune and save the best epoch of every member.
 
     Usage:
-        ``python -m token_verifier train`` (GPU recommended; about 1-2 GB of VRAM for the base model).
+        ``python -m token_verifier train`` (GPU recommended).
 
     Args:
         verifier_settings: All settings.
@@ -165,28 +110,18 @@ def run_training(verifier_settings: VerifierSettings) -> Path:
     Returns:
         The output model directory.
     """
-    path_settings, training_settings = verifier_settings.path_settings, verifier_settings.training_settings
-    torch.manual_seed(training_settings.random_seed)
-    loaded_verifier = load_verifier(path_settings.base_model, training_settings.device_name, new_head=True)
-    encoded_windows = [encoded_window for token_example in training_examples(path_settings.data_directory,
-                                                                             training_settings)
-                       for encoded_window in training_windows(loaded_verifier.text_tokenizer, token_example,
-                                                              training_settings.window_units,
-                                                              training_settings.max_tokens)]
-    validation_examples = selection_examples(path_settings.data_directory)
-    batches_per_epoch = -(-len(encoded_windows) // training_settings.batch_size)
-    optimizer_state = optimizer_for(loaded_verifier, training_settings, training_settings.epoch_count *
-                                    -(-batches_per_epoch // training_settings.gradient_accumulation))
-    shuffle_generator = random.Random(training_settings.random_seed)  # nosec B311  # noqa: S311 - shuffling, not cryptography
-    best_score = -1.0
-    for epoch_number in range(1, training_settings.epoch_count + 1):
-        epoch_loss = train_epoch(loaded_verifier, encoded_windows, optimizer_state, training_settings,
-                                 shuffle_generator,
-                                 lambda done_count, total_count, running_loss: None)
-        epoch_score, class_thresholds = selection_score(loaded_verifier, validation_examples, training_settings)
-        print(f"epoch {epoch_number}: loss {epoch_loss:.4f}, validation mean F1 {epoch_score:.4f}, "
-              f"thresholds {class_thresholds}", flush=True)
-        if epoch_score > best_score:
-            best_score = epoch_score
-            save_verifier(loaded_verifier, path_settings.output_model, class_thresholds, training_settings)
-    return path_settings.output_model
+    output_directory = verifier_settings.path_settings.output_model
+    member_count = max(1, verifier_settings.training_settings.ensemble_members)
+    base_seed = verifier_settings.training_settings.random_seed
+    if member_count == 1:
+        (output_directory / ENSEMBLE_FILE).unlink(missing_ok=True)
+        train_member(verifier_settings, output_directory, base_seed)
+        return output_directory
+    member_names = [f"member_{member_index}" for member_index in range(member_count)]
+    for member_index, member_name in enumerate(member_names):
+        print(f"training ensemble member {member_index + 1}/{member_count}", flush=True)
+        shutil.rmtree(output_directory / member_name, ignore_errors=True)
+        train_member(verifier_settings, output_directory / member_name, base_seed + member_index)
+    write_ensemble(output_directory, member_names)
+    print(f"ensemble thresholds: {run_tuning(verifier_settings)}", flush=True)
+    return output_directory

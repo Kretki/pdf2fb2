@@ -10,10 +10,26 @@ The token verifier is a multilingual encoder (default **XLM-RoBERTa base**, 278M
 | `misread` | wrongly parsed (`rnodern`, `врсмя`, `fame` for `same`) | the unit's text line is cropped and read again by Qianfan-OCR |
 | `inserted` | not on the page: text the OCR model wrote from context (a run-on continuation, a repeated line), or a reader's note | deleted when no word box lies under it; otherwise its line is read again |
 
-After the re-reads the segment is labelled again, and the new text is kept only when its mean error probability
-is lower (`verify_report.json` lists every decision). The pipeline runs this between word-box detection and word
-styles. It is **skipped automatically until `models/token_verifier/config.json` exists**, which is the output of
-the training below.
+After the re-reads the original and the re-read text are labelled again side by side, and the new text is kept
+only when its mean error probability is lower (`verify_report.json` lists every decision). The pipeline runs this
+between word-box detection and word styles. It is **skipped automatically until
+`models/token_verifier/verifier_config.json` (or `ensemble.json`) exists**, which is the output of the training
+below. A verifier trained with an older version must be trained again.
+
+Besides the text, every unit can carry **page evidence**, all of it language-independent:
+
+| evidence | where it comes from | pipeline switch |
+|---|---|---|
+| neighbouring segments of the page | segment order | always |
+| OCR confidence (lowest / mean token log-probability) | Qianfan-OCR scores, `segment["ocr_confidence"]` | on; `--no-ocr-confidence` turns it off |
+| word box missing / shared / too narrow | docTR word boxes (style stage) | on whenever word styles run |
+| second OCR read disagrees | a second read from a slightly larger crop, `segment["second_read_text"]` | `--second-read` (doubles OCR time) |
+| language-model plausibility | masked-LM head of `models/xlm-roberta-base` | on when the verifier was trained with `paths.language_model` |
+| word crop embedding (image-and-text) | `models/dinov2-small` | `--verify-crops`, for a verifier trained with `paths.visual_model` |
+
+Units the verifier is unsure about (error probability 0.15–0.6) can be judged by **Qwen3.5-9B as a
+vision-language model** against the image of their printed line (`--judge`); its answer is averaged with the
+verifier's probability before deletions and re-reads are planned.
 
 The verifier also decides **where Qwen3.5-9B looks**. Once `models/token_verifier` exists, Qwen no longer scores
 every token of the book. Before proofreading, the verifier labels every word of the book flow, and Qwen runs
@@ -37,16 +53,29 @@ Nothing is downloaded or trained automatically. The admin runs every step below.
 ## 1. Setup (once)
 
 ```bash
-uv sync --project workers/verifier_worker            # torch cu130 (RTX 50-series) + transformers
-hf download FacebookAI/xlm-roberta-base --local-dir models/xlm-roberta-base   # ~1.1 GB, base model for training
+scripts/sync_environments.sh                                   # all venvs (verifier: torch cu130 + transformers)
+hf download FacebookAI/xlm-roberta-base --local-dir models/xlm-roberta-base   # ~1.1 GB, if not present yet
+scripts/download_verifier_assets.sh fonts                      # rendering fonts (SIL OFL) -> models/fonts/
+scripts/download_verifier_assets.sh mdeberta byt5              # optional alternative backbones (safetensors)
 ```
 
-The pipeline only needs `models/token_verifier/` (the fine-tuned result). The base model is used for training
-only. A larger alternative is `FacebookAI/xlm-roberta-large` (560M). Set `paths.base_model` in a config file
-(section 6), and use `batch_size` 8 with `gradient_accumulation` 4.
+Models used by the verifier and where they come from:
 
-VRAM: base model training needs about 4 GB at batch size 16 in bf16. Inference needs under 1 GB. pdf2fb2 runs
-one worker at a time, so the verifier never shares the GPU with Qianfan-OCR or Qwen3.5.
+| model | role | needed for |
+|---|---|---|
+| `models/xlm-roberta-base` | default backbone; masked-LM plausibility scorer | training (backbone and `paths.language_model`) |
+| `models/dinov2-small` | word-crop embeddings | training/inference with `paths.visual_model` (already present) |
+| `models/qwen3.5-9B` | vision-language judge (`--judge`) | pipeline only (already present) |
+| `models/mdeberta-v3-base` | alternative sub-word backbone | optional (`paths.base_model`) |
+| `models/byt5-small` | byte-level backbone: sees every letter, any script | optional (`paths.base_model`, `backbone_kind: byte`) |
+| `models/fonts/*` | rendering fonts for rendered training pages | `render-references` (falls back to system fonts) |
+
+The pipeline only needs `models/token_verifier/` (the fine-tuned result) plus the evidence models it was trained
+with. The base model is used for training only.
+
+VRAM (RTX 5070 Ti, 16 GB): xlm-roberta-base training with plausibility features, R-Drop and EMA needs about 8 GB
+at batch size 16 in bf16; add about 1 GB for crop embeddings. Inference needs about 2 GB. The judge loads
+Qwen3.5-9B in 4 bit (about 7 GB). pdf2fb2 runs one worker at a time.
 
 ## 2. Corpus and splits
 
@@ -116,57 +145,136 @@ the printed estimate is deliberately on the long side.
 
 ## 4. Training data
 
-Two kinds of labelled data, both JSON lines in `benchmark_data/`:
+All examples are JSON lines in `benchmark_data/`. Besides `words` and `labels`, real and rendered examples carry
+the page evidence the pipeline sends at prediction time (`context_before`, `context_after`, `features`, and with
+`--crops` the word `crops`), so training and use see the same inputs.
+
+### 4a. Real pipeline output (aligned with the references)
 
 ```bash
-# (a) synthetic: reference text of correct books, corrupted like OCR corrupts text
+# convert sampled pages; OCR confidences are collected by default, --second-read adds the second read
+uv run pdf2fb2-bench run --yes --split train --name train_pages --pages 60 -- --no-verify --no-proofread --second-read
+uv run pdf2fb2-bench run --yes --split valid --name valid_pages --pages 20 -- --no-verify --no-proofread --second-read
+uv run pdf2fb2-bench run --yes --split test  --name baseline    --pages 10 -- --no-verify --second-read
+uv run pdf2fb2-bench export-aligned --name train_pages --crops   # -> aligned_train.jsonl (+ verify_crops/)
+uv run pdf2fb2-bench export-aligned --name valid_pages --crops   # -> aligned_valid.jsonl
+uv run pdf2fb2-bench export-aligned --name baseline --crops      # -> aligned_test.jsonl
+```
+
+More pages give more real examples, which is the most valuable data: `--pages 60` on the train split triples the
+earlier amount. Runs made before this version have no OCR confidences and no second read; convert them again
+(without `--reuse`) to get these features. Word boxes and crops come from any run with word styles.
+
+The labels come from aligning the output with the reference. Most references are machine OCR, so the export
+aligns every segment separately, drops pages that barely match their reference and segments that are mostly
+`inserted`, and labels case-, punctuation- and footnote-marker-only differences `ignore`. Two kinds of page are
+always kept: pages and segments with a **repetition loop** (a real `inserted` error of the OCR model) and every page
+of a **hand-proofread** reference (`text_quality` `hand_proofread_*` in `catalog.csv`).
+
+### 4b. Rendered pages (exact labels, real pipeline errors)
+
+The reference text of the train books is set in period fonts (Noto Serif, EB Garamond, IM Fell, Old Standard,
+PT Serif, Fraktur for German, Noto Serif CJK), printed to page images, degraded like a scan (blur, noise, skew,
+contrast, JPEG) and read by the real pipeline. The words of every page are known exactly, so the labels are exact
+and the errors are the pipeline's own. Only `references_train.jsonl` is rendered, so nothing leaks from valid or
+test.
+
+```bash
 uv run pdf2fb2-bench export-references --split train --chunks-per-language 600
+uv run pdf2fb2-bench render-references --split train --pages-per-language 200   # -> rendered_train/<language>/
+uv run pdf2fb2-bench run-rendered --split train -- --no-verify --no-proofread --second-read
+uv run pdf2fb2-bench export-rendered --split train --crops                       # -> rendered_train.jsonl
+```
+
+### 4c. Synthetic corruption of reference text
+
+```bash
 uv run pdf2fb2-bench export-references --split valid --chunks-per-language 150
 workers/verifier_worker/.venv/bin/python -m token_verifier synth --split train
 workers/verifier_worker/.venv/bin/python -m token_verifier synth --split valid
-
-# (b) real: pipeline output of all languages aligned with the reference
-uv run pdf2fb2-bench run --split train --name train_pages --pages 20 -- --no-verify --no-proofread
-uv run pdf2fb2-bench export-aligned --name train_pages        # -> aligned_train.jsonl
-uv run pdf2fb2-bench run --split valid --name valid_pages --pages 20 -- --no-verify --no-proofread
-uv run pdf2fb2-bench export-aligned --name valid_pages        # -> aligned_valid.jsonl
-uv run pdf2fb2-bench export-aligned --name baseline           # -> aligned_test.jsonl (step 3 run)
 ```
 
-Synthetic corruptions are:
+Synthetic examples imitate real pipeline output. Their kinds and proportions follow statistics of the training
+split's real output, never its text:
 
-* OCR confusion pairs (`с/е`, `ы/ые`, `rn/m`, `cl/d`, long `s`→`f`; the shared table is in
-  `workers/worker_protocol/src/worker_protocol/ocr_confusions.py`);
-* character drops, duplications and swaps;
-* inserted spans: repetition loops, a passage of the same book from elsewhere, and short reader notes.
+* every chunk is cut into segments of log-uniform length (3..150 units, median about 20, like real segments),
+  each with its neighbouring reference units as context;
+* misread units: OCR confusion pairs (`с/е`, `ы/ые`, `rn/m`, `cl/d`, long `s`→`f`, old orthography `ѣ/ъ/ь`;
+  the shared table is in `workers/worker_protocol/src/worker_protocol/ocr_confusions.py`), dropped diacritics,
+  letter drops, duplications and swaps, two words merged by a lost space and a word split by a space or a
+  leftover hyphen (`misread` piece plus `inserted` piece);
+* inserted spans, mostly one unit: footnote markers, stray letters and marks, short notes, repeated runs;
+* reference units that look like OCR errors of the reference itself (`goo4`, `mo&t`, `6hosen`, `〓`, mixed
+  scripts) are labelled `ignore`: most "correct" references are machine OCR, not proofread text.
 
-Both kinds cover every catalog language and are balanced between languages:
+Synthetic text has no page evidence; during training the evidence of real texts is also hidden at random
+(`evidence_dropout`), so the model works with and without it.
 
-* **Synthetic:** `--chunks-per-language` is one budget per language, shared by its books. English (many books)
-  and French (few books) contribute about the same amount.
-* **Real:** examples are oversampled per language towards the language with the most examples, by at most
-  `training.language_balance_cap` (8).
+### 4d. Relabelling the real data (confident learning)
 
-Real examples teach the model Qianfan's actual error distribution. Their labels come from the alignment with the
-reference, so with machine-OCR references a few labels are wrong. Synthetic data, the `old_russian` gold books
-and `real_repeat` together balance this.
+```bash
+workers/verifier_worker/.venv/bin/python -m token_verifier relabel     # -> aligned_train_relabelled.jsonl
+```
 
-To restrict an experiment to some languages, pass `--languages english,russian` to `run`. The reference export
-always takes all languages of the split.
+The train books are split into folds (`relabel.fold_count`). A model trained without a fold predicts that fold's
+units; a label the model contradicts with probability ≥ `relabel.relabel_confidence` is replaced (`ignore` units
+never change). Most such units are errors of a machine-OCR reference. `train` uses the relabelled file when it
+exists (`training.use_relabelled_real`). The command prints how many units changed, e.g. `misread->correct`.
 
 ## 5. Fine-tune, tune thresholds, evaluate
 
 ```bash
 cd workers/verifier_worker
-.venv/bin/python -m token_verifier train           # synthetic_train + aligned_train (x3); best epoch on valid
+.venv/bin/python -m token_verifier train           # two stages, best (EMA) epoch on valid
 .venv/bin/python -m token_verifier tune            # thresholds on aligned_valid (train already does this)
 .venv/bin/python -m token_verifier eval --split valid
 .venv/bin/python -m token_verifier eval --split test   # final report only; never tune on it
 ```
 
-`train` writes `models/token_verifier/`: weights, tokenizer, `thresholds.json` (decision thresholds of `misread`
-and `inserted`, chosen for the best F1 on validation) and `window_settings.json`. Epoch progress is printed. Only
-the epoch with the best validation F1 is kept.
+How `train` works:
+
+* **Backbone:** `paths.base_model`, any of xlm-roberta-base / mdeberta-v3-base (sub-word) or byt5-small
+  (bytes). The pretrained **word embeddings stay frozen** (`freeze_word_embeddings`), so the multilingual embedding
+  space keeps similar words of different languages close and languages absent from the data still work; lower
+  layers learn more slowly than upper ones (`layer_decay`).
+* **Unit head:** every unit is the max and mean of *all* its sub-word (or byte) states, joined with its page
+  evidence, language-model plausibility and optional crop embedding.
+* **Stage `mixed`:** synthetic + real + rendered windows for `epoch_count` epochs.
+* **Stage `real`:** real + rendered windows with `synthetic_replay_share` of synthetic windows for
+  `real_stage_epochs` epochs at `real_stage_learning_rate`.
+* **Regularisation:** R-Drop (`rdrop_weight`) and an EMA of the weights (`ema_decay`); validation and saving use
+  the EMA weights.
+* **Per epoch:** loss, thresholds (grid 0.005–0.95) and per-class / per-language precision, recall and F1 are
+  printed; the best epoch is saved; a stage stops after `early_stop_patience` epochs without improvement.
+* **Ensemble:** with `ensemble_members` > 1, members trained with different seeds go to `member_<n>/`,
+  `ensemble.json` lists them, their probabilities are averaged and the ensemble's thresholds are tuned at the end.
+
+`train` writes `models/token_verifier/`: `backbone/`, `verifier_head.safetensors`, `verifier_config.json`
+(backbone kind, evidence models, window settings) and `thresholds.json`.
+
+Example runs with other backbones:
+
+```bash
+cat > /tmp/mdeberta.json <<'JSON'
+{"paths": {"base_model": "models/mdeberta-v3-base", "output_model": "models/token_verifier_mdeberta"}}
+JSON
+.venv/bin/python -m token_verifier train --config /tmp/mdeberta.json
+
+cat > /tmp/byt5.json <<'JSON'
+{"paths": {"base_model": "models/byt5-small", "output_model": "models/token_verifier_byt5"},
+ "training": {"backbone_kind": "byte", "window_units": 48, "max_tokens": 1024, "batch_size": 8,
+              "gradient_accumulation": 4}}
+JSON
+.venv/bin/python -m token_verifier train --config /tmp/byt5.json
+
+cat > /tmp/ensemble.json <<'JSON'
+{"training": {"ensemble_members": 3}}
+JSON
+.venv/bin/python -m token_verifier train --config /tmp/ensemble.json
+```
+
+Evaluate another output directory by passing the same config to `eval`, and use it in the pipeline with
+`pdf2fb2 --verify-model-dir models/token_verifier_mdeberta`.
 
 `eval` writes `benchmark_data/verifier_reports/verifier_<split>.{md,json}`, with precision / recall / F1 of
 `misread` and `inserted` over all languages and per language. On the test split, the `old_russian` rows are the
@@ -175,40 +283,45 @@ ground-truth number.
 ## 6. Settings
 
 Defaults are in `src/token_verifier/default_settings.json`. To change them, pass a JSON file with only the keys
-to change, e.g.:
-
-```json
-{"training": {"epoch_count": 6, "learning_rate": 2e-05}, "paths": {"base_model": "models/xlm-roberta-large"}}
-```
-
-```bash
-.venv/bin/python -m token_verifier train --config my_settings.json
-```
+to change (`--config my_settings.json`, accepted by every command).
 
 | key | default | effect |
 |---|---|---|
-| `synthesis.misread_rate` | 0.06 | share of units corrupted per synthetic example |
-| `synthesis.insert_rate` | 0.3 | share of synthetic examples with an inserted span |
-| `training.window_units` / `max_tokens` | 96 / 256 | units per window / sub-word limit |
-| `training.class_weights` | 1, 3, 3 | loss weights of correct, misread, inserted (errors are rare) |
-| `training.real_repeat` | 3 | repetitions of real examples per epoch |
-| `training.language_balance_cap` | 8 | largest oversampling of a language's real examples (1 = no balancing) |
-| `training.epoch_count` | 4 | epochs |
+| `paths.base_model` | models/xlm-roberta-base | backbone to fine-tune |
+| `paths.language_model` | models/xlm-roberta-base | masked-LM plausibility features (`null` disables) |
+| `paths.visual_model` | models/dinov2-small | word-crop embeddings (`null` disables) |
+| `synthesis.misread_rate` | 0.06 | share of units corrupted per synthetic segment |
+| `synthesis.insert_rate` | 0.4 | share of synthetic segments with an inserted span |
+| `synthesis.min_segment_units` / `max_segment_units` | 3 / 150 | length range of synthetic segments |
+| `training.backbone_kind` | auto | `subword`, `byte` or detected from the checkpoint |
+| `training.window_units` / `max_tokens` / `context_units` | 96 / 384 / 32 | units per window / piece limit / context units per side |
+| `training.class_weights` | 1, 1.5, 1.5 | loss weights of correct, misread, inserted |
+| `training.freeze_word_embeddings` | true | keep the pretrained multilingual embeddings fixed |
+| `training.layer_decay` | 0.9 | learning-rate factor per layer below the top (1 disables) |
+| `training.rdrop_weight` | 0.5 | R-Drop consistency weight (0 disables; halves training speed when on) |
+| `training.ema_decay` | 0.999 | EMA of the weights (0 disables) |
+| `training.evidence_dropout` | 0.3 | probability of hiding a training text's page evidence |
+| `training.epoch_count` | 4 | epochs of stage `mixed` |
+| `training.real_stage_epochs` / `real_stage_learning_rate` | 2 / 1e-5 | stage `real` (0 epochs skips it) |
+| `training.synthetic_replay_share` | 0.15 | share of synthetic windows in stage `real` |
+| `training.real_repeat` / `rendered_repeat` | 1 / 1 | repetitions of real / rendered examples per epoch |
+| `training.language_balance_cap` | 3 | largest oversampling of a language's real examples (1 = no balancing) |
+| `training.early_stop_patience` | 2 | epochs without a better validation score before a stage stops (0 = never) |
+| `training.ensemble_members` | 1 | seeds trained and averaged |
+| `training.use_relabelled_real` | true | prefer `aligned_train_relabelled.jsonl` |
+| `relabel.fold_count` / `fold_epochs` / `relabel_confidence` | 4 / 1 / 0.9 | confident-learning relabelling |
 
 ## 7. Benchmark after training
 
 ```bash
-uv run pdf2fb2-bench run --split test --name verified --pages 10      # verifier on (models/token_verifier exists)
+uv run pdf2fb2-bench run --split test --name verified --pages 10 -- --second-read --verify-crops
+uv run pdf2fb2-bench run --split test --name judged   --pages 10 -- --second-read --verify-crops --judge
 ```
 
-Compare `benchmark_runs/verified/report.md` with `benchmark_runs/baseline/report.md`:
+Compare `benchmark_runs/<name>/report.md` with `benchmark_runs/baseline/report.md`:
 
 * The `ocr` level shows what the feedback re-reads changed.
 * The `final` level shows everything, including the gated Qwen proofreading.
-
-To compare the gated proofreading with the old whole-text proofreading on the same pages, run the test split
-once more with `-- --full-proofread`. Each book's `conversion/proofread_report.json` and the printed statistics
-show `proofread_scope` and how many words Qwen examined.
 
 Inserted-word rate should fall (hallucinated text removed). CER should fall wherever lines were re-read
 successfully. For each book, `benchmark_runs/<name>/<book>/conversion/verify_report.json` shows which units were
@@ -218,17 +331,57 @@ To switch the verifier off for a conversion, use `--no-verify` (Qwen then scores
 the verifier's re-reads but let Qwen score everything, use `--full-proofread`. To use another model
 directory, use `--verify-model-dir`.
 
+## 8. Complete command sequence
+
+```bash
+# setup
+scripts/sync_environments.sh
+scripts/download_verifier_assets.sh fonts            # add "mdeberta byt5" for the optional backbones
+uv run pdf2fb2-bench splits
+# real data (with OCR confidence and second read)
+uv run pdf2fb2-bench run --yes --split train --name train_pages --pages 60 -- --no-verify --no-proofread --second-read
+uv run pdf2fb2-bench run --yes --split valid --name valid_pages --pages 20 -- --no-verify --no-proofread --second-read
+uv run pdf2fb2-bench run --yes --split test  --name baseline    --pages 10 -- --no-verify --second-read
+uv run pdf2fb2-bench export-aligned --name train_pages --crops
+uv run pdf2fb2-bench export-aligned --name valid_pages --crops
+uv run pdf2fb2-bench export-aligned --name baseline --crops
+# rendered and synthetic data
+uv run pdf2fb2-bench export-references --split train --chunks-per-language 600
+uv run pdf2fb2-bench export-references --split valid --chunks-per-language 150
+uv run pdf2fb2-bench render-references --split train --pages-per-language 200
+uv run pdf2fb2-bench run-rendered --split train -- --no-verify --no-proofread --second-read
+uv run pdf2fb2-bench export-rendered --split train --crops
+workers/verifier_worker/.venv/bin/python -m token_verifier synth --split train
+workers/verifier_worker/.venv/bin/python -m token_verifier synth --split valid
+# relabel, train, evaluate
+workers/verifier_worker/.venv/bin/python -m token_verifier relabel
+workers/verifier_worker/.venv/bin/python -m token_verifier train
+workers/verifier_worker/.venv/bin/python -m token_verifier eval --split valid
+workers/verifier_worker/.venv/bin/python -m token_verifier eval --split test
+# benchmark with the verifier
+uv run pdf2fb2-bench run --split test --name verified --pages 10 -- --second-read --verify-crops --judge
+# optional: free the exported training crops once training and evaluation are finished
+rm -rf benchmark_data/verify_crops
+```
+
+Conversions delete their own verification crops (`verify_crops/`, `judge_lines/`, `second_read/ocr_crops/`) when a
+book has been verified. The crops written by `export-aligned --crops` / `export-rendered --crops` are training
+inputs: keep them until `relabel`, `train` and `eval` have run (re-export to recreate them).
+
 ## Layout
 
 | Path | Content |
 |---|---|
-| `src/token_verifier/datasets/` | JSONL examples, noise synthesis, unit → sub-word windows |
-| `src/token_verifier/networks/model_loading.py` | local-only loading of base / fine-tuned model, thresholds |
-| `src/token_verifier/training/` | epoch loop (AdamW, warm-up, bf16), training service |
+| `src/token_verifier/datasets/` | JSONL examples, noise synthesis, windows with context and evidence, batches |
+| `src/token_verifier/features/` | page evidence vectors, language-model plausibility, crop embeddings |
+| `src/token_verifier/networks/` | backbone adapters (sub-word / byte), unit head, saving and loading, ensembles |
+| `src/token_verifier/training/` | parameter groups, epoch loop (R-Drop, EMA), two-stage schedule, relabelling |
 | `src/token_verifier/evaluation/` | metrics, threshold tuning, reports |
 | `src/token_verifier/inference/` | batched prediction, pipeline job (`VerifyJob`, `worker_protocol/verify_job_schema.py`) |
-| `src/pdf2fb2/benchmark/` (orchestrator) | catalog, splits, sampling, references, scoring, exports |
-| `src/pdf2fb2/text_verification/` (orchestrator) | units, flags, regions, re-read loop, report |
+| `workers/worker_protocol/.../unit_features.py` | names and normalisation of the page evidence |
+| `workers/proofread_worker/.../visual_judge.py` | vision-language judge (`proofread_worker.judge_entry`) |
+| `src/pdf2fb2/benchmark/` (orchestrator) | catalog, splits, references, scoring, exports, rendered pages |
+| `src/pdf2fb2/text_verification/` (orchestrator) | units, evidence, second read, judge, re-read loop, report |
 
-Tests: `cd workers/verifier_worker && .venv/bin/python -m pytest` (tiny local tokenizer and random tiny encoder;
-nothing is downloaded).
+Tests: `cd workers/verifier_worker && .venv/bin/python -m pytest` (tiny local tokenizer and random tiny encoders;
+nothing is downloaded or loaded).

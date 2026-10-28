@@ -7,6 +7,7 @@ import urllib.request
 
 from PIL import Image
 
+from ocr_worker.token_confidence import RecognizedText, joined_char_logprobs
 from worker_protocol.field_validation import validate_http_url
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -58,7 +59,44 @@ class HttpOcrEngine:
             urllib.error.URLError: On connection or HTTP errors.
             ValueError: If the response is not the expected JSON shape.
         """
-        request_body = json.dumps(self._build_request_payload(crop_image, max_new_tokens)).encode("utf-8")
+        return _extract_message_text(self._post_request(self._build_request_payload(crop_image, max_new_tokens)))
+
+    def recognize_with_confidence(self, crop_image: Image.Image, max_new_tokens: int) -> RecognizedText:
+        """Send one crop asking for token log-probabilities.
+
+        Usage:
+            Called by the job runner when the job asks for confidences (the server must support ``logprobs``).
+
+        Args:
+            crop_image: RGB crop of one layout segment.
+            max_new_tokens: Generation budget, 1..32768.
+
+        Returns:
+            Message content and per-character log-probabilities (0 where the server's tokens do not spell it).
+
+        Raises:
+            urllib.error.URLError: On connection or HTTP errors.
+            ValueError: If the response is not the expected JSON shape.
+        """
+        request_payload = {**self._build_request_payload(crop_image, max_new_tokens), "logprobs": True}
+        response_document = self._post_request(request_payload)
+        message_text = _extract_message_text(response_document)
+        token_texts, token_logprobs = _extract_token_logprobs(response_document)
+        return RecognizedText(message_text, tuple(joined_char_logprobs(token_texts, token_logprobs, message_text)))
+
+    def _post_request(self, request_payload: dict) -> dict:
+        """POST a chat-completions request and decode the JSON answer.
+
+        Args:
+            request_payload: Request body.
+
+        Returns:
+            Decoded response.
+
+        Raises:
+            urllib.error.URLError: On connection or HTTP errors.
+        """
+        request_body = json.dumps(request_payload).encode("utf-8")
         # B310/S310/dynamic-urllib-use-detected: the URL scheme is restricted to http/https in __init__
         # (validate_http_url), so file:// and other schemes cannot reach urlopen.
         http_request = urllib.request.Request(  # nosec B310  # noqa: S310
@@ -66,8 +104,7 @@ class HttpOcrEngine:
         request_timeout = self._timeout_seconds
         # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(http_request, timeout=request_timeout) as http_response:  # nosec B310  # noqa: S310
-            response_document = json.loads(http_response.read(MAX_RESPONSE_BYTES))
-        return _extract_message_text(response_document)
+            return json.loads(http_response.read(MAX_RESPONSE_BYTES))
 
     def _build_request_payload(self, crop_image: Image.Image, max_new_tokens: int) -> dict:
         """Build the chat-completions request body with the crop as a data URL.
@@ -109,3 +146,22 @@ def _extract_message_text(response_document: object) -> str:
     if not isinstance(message_text, str):
         raise ValueError("Chat-completions message content is not a string.")
     return message_text
+
+
+def _extract_token_logprobs(response_document: dict) -> tuple[list[str], list[float]]:
+    """Token strings and log-probabilities of the first choice (empty when the server sent none).
+
+    Args:
+        response_document: Decoded JSON response.
+
+    Returns:
+        ``(token texts, log-probabilities)``.
+    """
+    try:
+        token_entries = response_document["choices"][0]["logprobs"]["content"] or []
+    except (KeyError, IndexError, TypeError):
+        return [], []
+    token_texts = [str(token_entry.get("token", "")) for token_entry in token_entries if isinstance(token_entry, dict)]
+    token_logprobs = [float(token_entry.get("logprob", 0.0)) for token_entry in token_entries
+                      if isinstance(token_entry, dict)]
+    return token_texts, token_logprobs

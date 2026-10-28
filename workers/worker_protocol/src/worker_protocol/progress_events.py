@@ -16,6 +16,7 @@ MARKS_PAGE_EVENT = "marks_page"
 STYLE_PAGE_EVENT = "style_page"
 PROOFREAD_PROGRESS_EVENT = "proofread_progress"
 VERIFY_PROGRESS_EVENT = "verify_progress"
+JUDGE_PROGRESS_EVENT = "judge_progress"
 
 
 def emit_progress_event(event_name: str, **event_fields: int | str) -> None:

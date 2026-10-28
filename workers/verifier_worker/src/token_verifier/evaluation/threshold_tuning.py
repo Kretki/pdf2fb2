@@ -2,7 +2,9 @@
 
 from token_verifier.evaluation.label_metrics import ERROR_CLASSES, class_scores
 
-THRESHOLD_GRID = tuple(round(grid_step / 100, 2) for grid_step in range(5, 96, 5))
+# Fine low end: a rare class such as ``inserted`` can peak below 0.05.
+LOW_THRESHOLDS = (0.005, 0.01, 0.015, 0.02, 0.03, 0.04)
+THRESHOLD_GRID = LOW_THRESHOLDS + tuple(round(grid_step / 100, 2) for grid_step in range(5, 96, 5))
 
 
 def best_threshold(gold_labels: list[str], probability_rows: list[list[float]], class_name: str) -> float:

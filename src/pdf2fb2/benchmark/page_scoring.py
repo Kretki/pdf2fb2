@@ -79,21 +79,36 @@ class BookScorer:
         """
         self._reference_source = reference_source
         self._cached_index: RegionIndex | None = None
+        self._cached_page: int | None = None
+
+    def region_index(self, page_index: int) -> RegionIndex:
+        """Trigram index of a page's search region, reused while the page (or the transcript) stays the same.
+
+        Args:
+            page_index: 0-based page of the original scan.
+
+        Returns:
+            The region index.
+        """
+        if self._cached_index is not None and self._cached_page == page_index:
+            return self._cached_index
+        region_words = self._reference_source.region_words(page_index)
+        if self._cached_index is None or self._cached_index.region_words is not region_words:
+            self._cached_index = RegionIndex(region_words)
+        self._cached_page = page_index
+        return self._cached_index
 
     def located_reference(self, page_index: int, output_words: list[str]) -> list[str] | None:
-        """Reference words of a page.
+        """Reference words of a page (or of one segment of it).
 
         Args:
             page_index: 0-based page of the original scan.
             output_words: Normalised output words.
 
         Returns:
-            Located words, or None when the page cannot be located.
+            Located words, or None when the words cannot be located.
         """
-        region_words = self._reference_source.region_words(page_index)
-        if self._cached_index is None or self._cached_index.region_words is not region_words:
-            self._cached_index = RegionIndex(region_words)
-        return self._cached_index.locate_passage(output_words)
+        return self.region_index(page_index).locate_passage(output_words)
 
     def score_page(self, page_index: int, output_text: str) -> PageCounts:
         """Counts of one page.

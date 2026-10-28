@@ -119,11 +119,16 @@ which only silences the warning; tokenization is unchanged.
    neighbouring words (normal / bold / italic / bold+italic and none / underline / strikeout), and
    the words inside each text segment are stored in `segments.json` (`words`).
    Token verification (`workers/verifier_worker`, `models/token_verifier`, skipped while that folder has no
-   `config.json`): every unit of the segment texts (whitespace tokens; Chinese/Japanese characters) is labelled
-   `correct` / `misread` / `inserted` (not on the page). Inserted units with no detected word box under them are
-   deleted. The text lines of misread units are cropped tightly and read again by Qianfan-OCR (`verify_rereads/`).
-   The segment is labelled again and the new text is kept only when its mean error probability is lower by 0.02
-   (`verify_report.json`; the old text stays in `pre_verify_text`).
+   `verifier_config.json`): every unit of the segment texts (whitespace tokens; Chinese/Japanese characters) is
+   labelled `correct` / `misread` / `inserted` (not on the page), with the neighbouring segments of the page as
+   context and page evidence: Qianfan-OCR's per-character confidence (`ocr_confidence` in `segments.json`), the
+   word boxes (missing, shared, too narrow), optionally a second OCR read from a larger crop (`--second-read`,
+   `second_read_text`) and word crops (`--verify-crops`). With `--judge`, units the verifier is unsure about are
+   checked by Qwen3.5-9B as a vision-language model against the image of their line (`judge_lines/`).
+   Inserted units with no detected word box under them are deleted. The text lines of misread units are cropped
+   tightly and read again by Qianfan-OCR (`verify_rereads/`). The original and the new text are labelled again
+   and the new text is kept only when its mean error probability is lower by 0.02 (`verify_report.json`; the old
+   text stays in `pre_verify_text`).
 7. The words are aligned with the OCR tokens of their segment (dynamic programming on character
    count vs box width, so merged or split boxes do not shift the styles) and the text gets
    `<b>`/`<i>`/`<s>` tags, which become `<strong>`/`<emphasis>`/`<strikethrough>` in the FB2.
@@ -174,7 +179,8 @@ which only silences the warning; tokenization is unchanged.
 `--no-proofread` skips step 9 (`--proofread-model-dir` changes the language model folder),
 `--no-verify` skips the token verification of step 6 and makes step 9 score the whole text
 (`--verify-model-dir` changes the verifier folder), `--full-proofread` keeps the verifier's re-reads but lets
-Qwen score the whole text,
+Qwen score the whole text, `--second-read`, `--verify-crops` and `--judge` (`--judge-model-dir`) add verifier
+evidence (see `workers/verifier_worker/README.md`), `--no-ocr-confidence` stops collecting OCR confidences,
 `--no-picture-recovery` skips the picture recovery of step 5, `--no-residual-text` the residual text,
 `--no-layout-review` the label statistics before and after OCR (running heads, page numbers, headings).
 

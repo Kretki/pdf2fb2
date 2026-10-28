@@ -2,7 +2,9 @@
 
 Subcommands: ``splits`` (create / show the locked book split), ``run`` (convert sampled pages of a split and
 score them), ``score`` (score an existing run again), ``export-references`` and ``export-aligned`` (verifier
-training data). Only books with ``ocr_state == correct`` in ``catalog.csv`` are used.
+training data), ``render-references``, ``run-rendered`` and ``export-rendered`` (reference text rendered to page
+images, read by the pipeline and labelled exactly). Only books with ``ocr_state == correct`` in ``catalog.csv``
+are used.
 """
 
 import argparse
@@ -14,6 +16,8 @@ from pdf2fb2.benchmark.benchmark_runner import RunSettings, books_to_convert, ru
 from pdf2fb2.benchmark.benchmark_scoring import markdown_report, score_run
 from pdf2fb2.benchmark.book_splits import SPLIT_NAMES, locked_splits
 from pdf2fb2.benchmark.corpus_catalog import read_correct_books
+from pdf2fb2.benchmark.rendered_export import export_rendered, run_rendered
+from pdf2fb2.benchmark.rendered_pages import render_references
 from pdf2fb2.benchmark.verifier_export import export_aligned, export_references
 from pdf2fb2.interface.command_line import ABORTED_EXIT_CODE, build_argument_parser, run_command_line
 from pdf2fb2.interface.input_validation import bounded_integer, parse_safe_path
@@ -106,7 +110,36 @@ def build_benchmark_parser() -> argparse.ArgumentParser:
     aligned_parser = subcommand_parsers.add_parser("export-aligned", help="labelled pipeline output of a run")
     add_common_arguments(aligned_parser)
     aligned_parser.add_argument("--name", dest="run_name", type=parse_safe_path, required=True)
+    aligned_parser.add_argument("--crops", dest="write_crops", action="store_true",
+                                help="also write word crops (image-and-text verifier features)")
+    add_rendered_parsers(subcommand_parsers)
     return argument_parser
+
+
+def add_rendered_parsers(subcommand_parsers: argparse._SubParsersAction) -> None:
+    """Register the rendered-page subcommands.
+
+    Args:
+        subcommand_parsers: Subcommand registry (mutated).
+
+    Returns:
+        None.
+    """
+    render_parser = subcommand_parsers.add_parser("render-references", help="render reference chunks to scans")
+    add_common_arguments(render_parser)
+    render_parser.add_argument("--split", dest="split_name", choices=SPLIT_NAMES, default="train")
+    render_parser.add_argument("--pages-per-language", dest="pages_per_language", type=bounded_integer(1, 20_000),
+                               default=200, help="rendered pages per language (default 200)")
+    run_parser = subcommand_parsers.add_parser("run-rendered", help="convert the rendered PDFs with the pipeline")
+    add_common_arguments(run_parser)
+    run_parser.add_argument("--split", dest="split_name", choices=SPLIT_NAMES, default="train")
+    run_parser.add_argument("pipeline_arguments", nargs=argparse.REMAINDER,
+                            help="after '--': options passed to every pdf2fb2 conversion")
+    export_parser = subcommand_parsers.add_parser("export-rendered", help="label the converted rendered pages")
+    add_common_arguments(export_parser)
+    export_parser.add_argument("--split", dest="split_name", choices=SPLIT_NAMES, default="train")
+    export_parser.add_argument("--crops", dest="write_crops", action="store_true",
+                               help="also write word crops (image-and-text verifier features)")
 
 
 def run_split_command(parsed_arguments: argparse.Namespace) -> int:
@@ -192,12 +225,57 @@ def run_aligned_command(parsed_arguments: argparse.Namespace) -> int:
         Exit code 0.
     """
     print(export_aligned(DEFAULT_RUNS_DIRECTORY / parsed_arguments.run_name, parsed_arguments.corpus_root,
-                         parsed_arguments.data_directory))
+                         parsed_arguments.data_directory, parsed_arguments.write_crops))
+    return 0
+
+
+def run_render_command(parsed_arguments: argparse.Namespace) -> int:
+    """Render the reference chunks of a split.
+
+    Args:
+        parsed_arguments: Parsed options.
+
+    Returns:
+        Exit code 0.
+    """
+    print(render_references(parsed_arguments.data_directory, parsed_arguments.split_name,
+                            parsed_arguments.pages_per_language))
+    return 0
+
+
+def run_rendered_command(parsed_arguments: argparse.Namespace) -> int:
+    """Convert the rendered PDFs of a split.
+
+    Args:
+        parsed_arguments: Parsed options.
+
+    Returns:
+        Exit code 0, or 1 when a conversion failed.
+    """
+    pipeline_arguments = tuple(argument_text for argument_text in parsed_arguments.pipeline_arguments
+                               if argument_text != "--")
+    failure_count = run_rendered(parsed_arguments.data_directory, parsed_arguments.split_name,
+                                 parsed_arguments.corpus_root, CommandLineConverter(pipeline_arguments))
+    return 1 if failure_count else 0
+
+
+def run_export_rendered_command(parsed_arguments: argparse.Namespace) -> int:
+    """Label the converted rendered pages.
+
+    Args:
+        parsed_arguments: Parsed options.
+
+    Returns:
+        Exit code 0.
+    """
+    print(export_rendered(parsed_arguments.data_directory, parsed_arguments.split_name, parsed_arguments.write_crops))
     return 0
 
 
 COMMAND_HANDLERS = {"splits": run_split_command, "run": run_benchmark_split, "score": run_score_command,
-                    "export-references": run_references_command, "export-aligned": run_aligned_command}
+                    "export-references": run_references_command, "export-aligned": run_aligned_command,
+                    "render-references": run_render_command, "run-rendered": run_rendered_command,
+                    "export-rendered": run_export_rendered_command}
 
 
 def run_benchmark_command(argument_list: list[str] | None = None) -> int:

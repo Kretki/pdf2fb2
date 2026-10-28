@@ -7,7 +7,9 @@
   (``{"book_key", "language", "page", "words", "labels"}``). Every verifier unit of the segment's OCR text
   (``text_verification.verify_units``: whitespace tokens, CJK characters) is labelled by aligning the page with
   its located reference: ``correct``, ``misread``, ``inserted`` (text
-  that is not in the book), or ``ignore`` for pure markup tokens.
+  that is not in the book), or ``ignore`` for pure markup tokens and convention-only differences. Every segment
+  is aligned against its own passage of the page region; pages and segments whose labels are mostly reference
+  noise are left out (``label_reliability``).
 """
 
 import hashlib
@@ -22,18 +24,20 @@ from pathlib import Path
 from pdf2fb2.benchmark.benchmark_runner import CONVERSION_DIRECTORY, RUN_MANIFEST_FILE
 from pdf2fb2.benchmark.book_splits import locked_splits
 from pdf2fb2.benchmark.corpus_catalog import TRANSCRIPT_REFERENCE, CatalogBook, read_correct_books
-from pdf2fb2.benchmark.edit_alignment import MISSED_LABEL, align_words
-from pdf2fb2.benchmark.page_outputs import SEGMENTS_FILE, segment_text
+from pdf2fb2.benchmark.edit_alignment import MISREAD_LABEL, MISSED_LABEL, AlignedPair, align_words
+from pdf2fb2.benchmark.export_evidence import CropOptions, page_evidence, page_segment_units
+from pdf2fb2.benchmark.label_reliability import is_convention_difference, page_is_reliable, segment_is_reliable
+from pdf2fb2.benchmark.page_outputs import SEGMENTS_FILE
 from pdf2fb2.benchmark.page_sampling import sample_pages
 from pdf2fb2.benchmark.page_scoring import BookScorer
 from pdf2fb2.benchmark.reference_texts import reference_source
 from pdf2fb2.benchmark.text_normalization import token_form
 from pdf2fb2.segments.label_roles import is_book_text
-from pdf2fb2.text_verification.verify_units import verify_units
 
 IGNORE_LABEL = "ignore"
 CHUNK_WORDS = 200
 MIN_CHUNK_WORDS = 20
+MIN_LOCATED_FORMS = 5    # shorter segments keep their page-level labels
 
 
 def reference_chunks(catalog_book: CatalogBook, chunk_count: int) -> Iterator[list[str]]:
@@ -94,11 +98,29 @@ def export_references(corpus_root: Path, data_directory: Path, split_name: str, 
     return output_path
 
 
-def token_labels(page_tokens: list[str], reference_words: list[str]) -> list[str]:
-    """Label every raw output token of a page.
+def pair_label(aligned_pair: AlignedPair, output_form: str, reference_words: list[str]) -> str:
+    """Training label of one aligned output word.
 
     Args:
-        page_tokens: Verifier units of the page's OCR text.
+        aligned_pair: Alignment step with an output word.
+        output_form: Normalised form of that output word.
+        reference_words: Located reference words.
+
+    Returns:
+        The alignment label, or ``ignore`` for a misread that differs only by case, punctuation or a
+        footnote marker (reference conventions, not OCR errors).
+    """
+    if aligned_pair.pair_label == MISREAD_LABEL and is_convention_difference(
+            output_form, reference_words[aligned_pair.reference_index]):
+        return IGNORE_LABEL
+    return aligned_pair.pair_label
+
+
+def token_labels(page_tokens: list[str], reference_words: list[str]) -> list[str]:
+    """Label every raw output token of a page or segment.
+
+    Args:
+        page_tokens: Verifier units of the OCR text.
         reference_words: Located reference words.
 
     Returns:
@@ -110,41 +132,76 @@ def token_labels(page_tokens: list[str], reference_words: list[str]) -> list[str
     for aligned_pair in align_words([token_forms[token_index] for token_index in compared_positions],
                                     reference_words, free_ends=True):
         if aligned_pair.pair_label != MISSED_LABEL:
-            page_labels[compared_positions[aligned_pair.output_index]] = aligned_pair.pair_label
+            token_index = compared_positions[aligned_pair.output_index]
+            page_labels[token_index] = pair_label(aligned_pair, token_forms[token_index], reference_words)
     return page_labels
 
 
-def page_examples(catalog_book: CatalogBook, book_scorer: BookScorer, page_record: dict,
-                  original_page: int) -> Iterator[dict]:
-    """Labelled segments of one converted page.
+def segment_labels(book_scorer: BookScorer, original_page: int, segment_tokens: list[str],
+                   page_labels: list[str]) -> list[str]:
+    """Labels of one segment, aligned against its own passage of the page's reference region.
+
+    Usage:
+        Blocks may be read in a different order than the reference lists them (columns, captions, vertical
+        Japanese text), which a single page-level alignment turns into ``inserted`` runs.
+
+    Args:
+        book_scorer: Reference locator of the book.
+        original_page: Original 0-based page index.
+        segment_tokens: Verifier units of the segment.
+        page_labels: The segment's slice of the page-level labels (used when the segment cannot be located).
+
+    Returns:
+        One label per unit.
+    """
+    segment_forms = [form_text for form_text in map(token_form, segment_tokens) if form_text]
+    segment_reference = book_scorer.located_reference(original_page, segment_forms) \
+        if len(segment_forms) >= MIN_LOCATED_FORMS else None
+    return page_labels if segment_reference is None else token_labels(segment_tokens, segment_reference)
+
+
+def page_examples(catalog_book: CatalogBook, book_scorer: BookScorer, page_record: dict, original_page: int,
+                  crop_options: CropOptions | None = None) -> Iterator[dict]:
+    """Labelled segments of one converted page, with their page evidence.
 
     Args:
         catalog_book: Book.
-        book_scorer: Reference locator of the book.
+        book_scorer: Reference locator of the book (``BookScorer``, or ``ManifestReference`` for rendered pages).
         page_record: Page record of ``segments.json``.
         original_page: Original 0-based page index.
+        crop_options: Word-crop settings (None: no crops).
 
     Yields:
-        One example per text segment (nothing when the page cannot be located).
+        One example per reliable text segment (nothing when the page cannot be located or its reference
+        matches too poorly, see ``label_reliability``).
     """
-    segment_tokens = [[verify_unit.unit_text for verify_unit in verify_units(segment_text(page_segment))]
-                      for page_segment in page_record["segments"] if is_book_text(page_segment)]
+    segment_entries = page_segment_units([page_segment for page_segment in page_record["segments"]
+                                          if is_book_text(page_segment)])
+    segment_tokens = [[verify_unit.unit_text for verify_unit in segment_entry.segment_units]
+                      for segment_entry in segment_entries]
     page_tokens = [raw_token for token_list in segment_tokens for raw_token in token_list]
     reference_words = book_scorer.located_reference(original_page, [form_text for form_text in map(
         token_form, page_tokens) if form_text])
     if reference_words is None:
         return
     page_labels = token_labels(page_tokens, reference_words)
+    if not page_is_reliable(page_labels, catalog_book.is_proofread, page_tokens):
+        return
+    evidence_list = page_evidence(page_record, segment_entries,
+                                  crop_options or CropOptions(None, catalog_book.book_key))
     read_offset = 0
-    for token_list in segment_tokens:
-        if token_list:
-            yield {"book_key": catalog_book.book_key, "language": catalog_book.language_name,
-                   "page": original_page, "words": token_list,
-                   "labels": page_labels[read_offset:read_offset + len(token_list)]}
+    for token_list, segment_evidence in zip(segment_tokens, evidence_list, strict=True):
+        unit_labels = segment_labels(book_scorer, original_page, token_list,
+                                     page_labels[read_offset:read_offset + len(token_list)])
         read_offset += len(token_list)
+        if token_list and segment_is_reliable(unit_labels, catalog_book.is_proofread, token_list):
+            yield {"book_key": catalog_book.book_key, "language": catalog_book.language_name,
+                   "page": original_page, "words": token_list, "labels": unit_labels,
+                   **{evidence_key: evidence_value for evidence_key, evidence_value in segment_evidence.items()
+                      if evidence_value}}
 
 
-def export_aligned(run_directory: Path, corpus_root: Path, data_directory: Path) -> Path:
+def export_aligned(run_directory: Path, corpus_root: Path, data_directory: Path, write_crops: bool = False) -> Path:
     """Write ``aligned_<split>.jsonl`` from a benchmark run.
 
     Usage:
@@ -154,6 +211,7 @@ def export_aligned(run_directory: Path, corpus_root: Path, data_directory: Path)
         run_directory: Run directory with ``run_manifest.json``.
         corpus_root: Corpus directory.
         data_directory: Output directory.
+        write_crops: Write word crops (under ``data_directory/verify_crops``) for the image-and-text features.
 
     Returns:
         Path of the written file.
@@ -171,6 +229,9 @@ def export_aligned(run_directory: Path, corpus_root: Path, data_directory: Path)
             book_scorer = BookScorer(reference_source(catalog_book))
             for page_record in json.loads(segments_path.read_text(encoding="utf-8")):
                 original_page = book_entry["pages"][page_record["page"] - 1]
-                for page_example in page_examples(catalog_book, book_scorer, page_record, original_page):
+                crop_options = CropOptions(data_directory if write_crops else None,
+                                           f"{run_manifest['split']}_{catalog_book.book_key}")
+                for page_example in page_examples(catalog_book, book_scorer, page_record, original_page,
+                                                  crop_options):
                     output_file.write(json.dumps(page_example, ensure_ascii=False) + "\n")
     return output_path

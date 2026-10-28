@@ -10,43 +10,38 @@
    lower by ``ACCEPT_MARGIN``. Every decision goes to ``verify_report.json``.
 
 Without word boxes (``--no-styles``) only step 1 runs and the flags are reported.
+
+The first pass sends every unit with its page evidence (``unit_evidence``): neighbouring segments as context, OCR
+confidence, word boxes, an optional second OCR read (``second_read``) and optional word crops. Units the verifier
+is unsure about can be judged by a vision-language model against their line image (``uncertain_units``). The
+recheck labels the original and the candidate text alike (context only), so their error masses are comparable.
 """
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
 
-from pdf2fb2.model_stages.verify_stage import VerifyOutcome
 from pdf2fb2.pipeline.stage_contracts import SegmentRecognizer
 from pdf2fb2.progress.progress_contracts import StageProgress
 from pdf2fb2.segments.label_roles import is_book_text
-from pdf2fb2.text_verification.region_mapping import ReadRegion, place_units, reread_regions, unprinted_units
+from pdf2fb2.text_verification.evidence_items import CANDIDATE_SUFFIX, ORIGINAL_SUFFIX, evidence_items, recheck_items
+from pdf2fb2.text_verification.region_mapping import (
+    ReadRegion,
+    UnitPlacement,
+    place_units,
+    reread_regions,
+    unprinted_units,
+)
+from pdf2fb2.text_verification.second_read import read_segments_again
+from pdf2fb2.text_verification.temporary_images import remove_temporary_images
 from pdf2fb2.text_verification.text_splicing import TextEdit, apply_edits, deletion_edit, flat_reading
+from pdf2fb2.text_verification.uncertain_units import UnitJudge, judged_probabilities
 from pdf2fb2.text_verification.unit_flags import error_mass, flag_units
+from pdf2fb2.text_verification.verification_contracts import FeedbackOptions, ItemLabeler
 from pdf2fb2.text_verification.verify_report import write_verify_report
 from pdf2fb2.text_verification.verify_units import VerifyUnit, verify_units
 
 ACCEPT_MARGIN = 0.02
 REREAD_DIRECTORY = "verify_rereads"
-
-
-class UnitLabeler(Protocol):
-    """Labels text units (see ``model_stages.verify_stage.VerifyStage``)."""
-
-    def label_units(self, unit_lists: dict[str, list[str]], work_directory: Path, job_name: str,
-                    stage_progress: StageProgress) -> VerifyOutcome:
-        """Probabilities of every unit.
-
-        Args:
-            unit_lists: Item key -> units.
-            work_directory: Output directory.
-            job_name: Job file stem.
-            stage_progress: Progress sink.
-
-        Returns:
-            Probabilities and thresholds.
-        """
-        ...
 
 
 @dataclass
@@ -60,6 +55,9 @@ class SegmentCase:
         text_edits: Deletions decided in the first pass.
         read_regions: Regions to re-read.
         decision_notes: Report entries.
+        unit_placement: Placement on the word boxes (set when the evidence is built).
+        context_before: Units of the page before the segment.
+        context_after: Units of the page after the segment.
     """
 
     page_record: dict
@@ -68,6 +66,9 @@ class SegmentCase:
     text_edits: list[TextEdit] = field(default_factory=list)
     read_regions: list[ReadRegion] = field(default_factory=list)
     decision_notes: dict = field(default_factory=dict)
+    unit_placement: UnitPlacement | None = None
+    context_before: tuple[str, ...] = ()
+    context_after: tuple[str, ...] = ()
 
 
 def segment_cases(page_records: list[dict]) -> dict[str, SegmentCase]:
@@ -98,7 +99,8 @@ def plan_segment(segment_case: SegmentCase, probability_rows: list[list[float]],
         None.
     """
     unit_flags = flag_units(probability_rows, class_thresholds)
-    unit_placement = place_units(segment_case.segment_units, segment_case.page_segment.get("words") or [])
+    unit_placement = segment_case.unit_placement or place_units(segment_case.segment_units,
+                                                                segment_case.page_segment.get("words") or [])
     deleted_units = unprinted_units(unit_placement, list(unit_flags.inserted_units),
                                     segment_case.segment_units)
     segment_case.text_edits = [deletion_edit(segment_case.page_segment["text"], segment_case.segment_units[unit_index])
@@ -166,35 +168,63 @@ class VerificationFeedback:
         boxes are detected and before word styles are applied.
     """
 
-    def __init__(self, unit_labeler: UnitLabeler, region_reader: SegmentRecognizer) -> None:
+    def __init__(self, item_labeler: ItemLabeler, region_reader: SegmentRecognizer,
+                 feedback_options: FeedbackOptions | None = None, unit_judge: UnitJudge | None = None) -> None:
         """Store the stages.
 
         Args:
-            unit_labeler: Verifier stage.
-            region_reader: OCR stage used to re-read regions.
+            item_labeler: Verifier stage.
+            region_reader: OCR stage used to re-read regions (and for the second read).
+            feedback_options: Optional evidence; None uses the defaults (no crops, no second read).
+            unit_judge: Vision-language judge of uncertain units, or None.
         """
-        self._unit_labeler = unit_labeler
+        self._item_labeler = item_labeler
         self._region_reader = region_reader
+        self._feedback_options = feedback_options or FeedbackOptions()
+        self._unit_judge = unit_judge
 
     def verify_segments(self, page_records: list[dict], work_directory: Path, stage_progress: StageProgress) -> dict:
-        """Verify all segments, re-read flagged lines and keep the better texts.
+        """Verify all segments, re-read flagged lines and keep the better texts; remove the temporary crops.
 
         Args:
             page_records: OCR'd page records (segment ``text`` replaced when a change is accepted; the
                 previous text is kept in ``pre_verify_text``).
-            work_directory: Output directory.
+            work_directory: Output directory (``verify_crops/``, ``judge_lines/`` and ``second_read/ocr_crops/``
+                are deleted when verification ends, also after a failure).
             stage_progress: Progress sink of the verification stage.
 
         Returns:
             Summary counts.
         """
+        try:
+            return self._verify_pages(page_records, work_directory, stage_progress)
+        finally:
+            remove_temporary_images(work_directory)
+
+    def _verify_pages(self, page_records: list[dict], work_directory: Path, stage_progress: StageProgress) -> dict:
+        """Run the verification loop over all segments.
+
+        Args:
+            page_records: OCR'd page records (mutated as in ``verify_segments``).
+            work_directory: Output directory.
+            stage_progress: Progress sink.
+
+        Returns:
+            Summary counts.
+        """
         cases_by_key = segment_cases(page_records)
-        first_outcome = self._unit_labeler.label_units(
-            {segment_key: [verify_unit.unit_text for verify_unit in segment_case.segment_units]
-             for segment_key, segment_case in cases_by_key.items()}, work_directory, "verify_job", stage_progress)
+        if self._feedback_options.second_read:
+            read_segments_again(self._region_reader, [(segment_case.page_record, segment_case.page_segment)
+                                                      for segment_case in cases_by_key.values()],
+                                work_directory, stage_progress)
+        first_outcome = self._item_labeler.label_items(
+            evidence_items(cases_by_key, work_directory, self._feedback_options.write_crops), work_directory,
+            "verify_job", stage_progress)
+        unit_probabilities = first_outcome.unit_probabilities if self._unit_judge is None else judged_probabilities(
+            cases_by_key, first_outcome.unit_probabilities, self._unit_judge, self._feedback_options.judge_band,
+            work_directory, stage_progress)
         for segment_key, segment_case in cases_by_key.items():
-            plan_segment(segment_case, first_outcome.unit_probabilities.get(segment_key, []),
-                         first_outcome.class_thresholds)
+            plan_segment(segment_case, unit_probabilities.get(segment_key, []), first_outcome.class_thresholds)
         candidate_texts = self._reread_candidates(cases_by_key, work_directory, stage_progress)
         accepted_count = self._accept_better(cases_by_key, candidate_texts, work_directory, stage_progress)
         return write_verify_report(work_directory, cases_by_key, accepted_count)
@@ -240,15 +270,16 @@ class VerificationFeedback:
         """
         changed_texts = {segment_key: new_text for segment_key, new_text in candidate_texts.items()
                          if new_text and new_text != cases_by_key[segment_key].page_segment["text"]}
-        second_outcome = self._unit_labeler.label_units(
-            {segment_key: [verify_unit.unit_text for verify_unit in verify_units(new_text)]
-             for segment_key, new_text in changed_texts.items()}, work_directory, "verify_recheck_job", stage_progress)
+        second_outcome = self._item_labeler.label_items(
+            recheck_items(cases_by_key, changed_texts), work_directory, "verify_recheck_job", stage_progress)
         accepted_count = 0
         for segment_key, new_text in changed_texts.items():
             segment_case = cases_by_key[segment_key]
-            new_mass = error_mass(second_outcome.unit_probabilities.get(segment_key, []))
-            segment_case.decision_notes.update({"candidate": new_text, "candidate_error_mass": round(new_mass, 4)})
-            if new_mass + ACCEPT_MARGIN <= segment_case.decision_notes["error_mass"]:
+            old_mass = error_mass(second_outcome.unit_probabilities.get(f"{segment_key}{ORIGINAL_SUFFIX}", []))
+            new_mass = error_mass(second_outcome.unit_probabilities.get(f"{segment_key}{CANDIDATE_SUFFIX}", []))
+            segment_case.decision_notes.update({"candidate": new_text, "candidate_error_mass": round(new_mass, 4),
+                                                "recheck_error_mass": round(old_mass, 4)})
+            if new_mass + ACCEPT_MARGIN <= old_mass:
                 segment_case.page_segment["pre_verify_text"] = segment_case.page_segment["text"]
                 segment_case.page_segment["text"] = new_text
                 segment_case.decision_notes["accepted"] = True

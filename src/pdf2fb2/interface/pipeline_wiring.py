@@ -10,6 +10,7 @@ import sys
 from pdf2fb2.document_sources.djvu_source import DjvuToPdfConverter
 from pdf2fb2.document_sources.pdf_source import PdfPassThrough
 from pdf2fb2.document_sources.source_formats import SourceFormatRegistry
+from pdf2fb2.model_stages.judge_stage import JudgeStage
 from pdf2fb2.model_stages.layout_stage import LayoutStage
 from pdf2fb2.model_stages.marks_stage import MarksStage
 from pdf2fb2.model_stages.ocr_stage import OcrBackendSettings, OcrStage
@@ -27,12 +28,14 @@ from pdf2fb2.project_paths import READERMARKS_CHECKPOINT_DIRECTORY, SPEED_METRIC
 from pdf2fb2.proofreading.flow_proofreader import LanguageModelProofreader
 from pdf2fb2.segments.glyph_measurement import OpenCvGlyphMeter
 from pdf2fb2.text_verification.feedback_loop import VerificationFeedback
+from pdf2fb2.text_verification.verification_contracts import FeedbackOptions
 from pdf2fb2.text_verification.word_flagging import VerifierWordFlagger
 from pdf2fb2.timekeeping.run_timing import RunTiming
 from pdf2fb2.timekeeping.speed_metrics_store import JsonSpeedMetricsStore
 from pdf2fb2.timekeeping.time_estimation import ConversionPlan
 from pdf2fb2.timekeeping.workload_units import FLAGGED_SCOPE, FULL_SCOPE
 from pdf2fb2.worker_runtime.worker_environment import (
+    JUDGE_WORKER,
     LAYOUT_WORKER,
     MARKS_WORKER,
     OCR_WORKER,
@@ -42,6 +45,8 @@ from pdf2fb2.worker_runtime.worker_environment import (
 )
 from pdf2fb2.worker_runtime.worker_launcher import SubprocessWorkerLauncher
 from worker_protocol.ocr_job_schema import HTTP_BACKEND, TRANSFORMERS_BACKEND
+
+VERIFIER_MARKER_FILES = ("verifier_config.json", "ensemble.json")
 
 
 def build_source_registry() -> SourceFormatRegistry:
@@ -71,6 +76,7 @@ def build_ocr_settings(parsed_arguments: argparse.Namespace) -> OcrBackendSettin
         server_url=parsed_arguments.qianfan_url,
         server_model=parsed_arguments.qianfan_model if use_server else None,
         parallel_requests=parsed_arguments.parallel_requests,
+        collect_confidences=not parsed_arguments.skip_ocr_confidence,
     )
 
 
@@ -119,16 +125,38 @@ def build_verify_stage(parsed_arguments: argparse.Namespace,
         worker_launcher: Process launcher.
 
     Returns:
-        The stage, or None (``--no-verify`` or no ``config.json`` in the verifier directory).
+        The stage, or None (``--no-verify`` or no trained verifier in the verifier directory).
     """
     if parsed_arguments.skip_verify:
         return None
-    if not (parsed_arguments.verify_model_directory / "config.json").is_file():
-        print(f"pdf2fb2: no token verifier in {parsed_arguments.verify_model_directory}: no OCR re-reads, "
-              f"proofreading scores the whole text", file=sys.stderr)
+    verify_directory = parsed_arguments.verify_model_directory
+    if not any((verify_directory / marker_name).is_file() for marker_name in VERIFIER_MARKER_FILES):
+        print(f"pdf2fb2: no token verifier (verifier_config.json) in {verify_directory}: no OCR re-reads, "
+              f"proofreading scores the whole text; train it with 'token_verifier train'", file=sys.stderr)
         return None
     return VerifyStage(worker_launcher, VERIFY_WORKER, parsed_arguments.verify_model_directory,
                        parsed_arguments.device_name)
+
+
+def build_verification(parsed_arguments: argparse.Namespace, worker_launcher: SubprocessWorkerLauncher,
+                       verify_stage: VerifyStage | None, ocr_stage: OcrStage) -> VerificationFeedback | None:
+    """Verification loop with the evidence options of the command line.
+
+    Args:
+        parsed_arguments: Parsed command line.
+        worker_launcher: Process launcher.
+        verify_stage: Verifier stage, or None (no verification).
+        ocr_stage: OCR stage (re-reads and second read).
+
+    Returns:
+        The loop, or None without a verifier.
+    """
+    if verify_stage is None:
+        return None
+    judge_stage = JudgeStage(worker_launcher, JUDGE_WORKER, parsed_arguments.judge_model_directory,
+                             parsed_arguments.device_name) if parsed_arguments.use_judge else None
+    return VerificationFeedback(verify_stage, ocr_stage, FeedbackOptions(
+        write_crops=parsed_arguments.verify_crops, second_read=parsed_arguments.second_read), judge_stage)
 
 
 def build_flow_checker(parsed_arguments: argparse.Namespace, worker_launcher: SubprocessWorkerLauncher,
@@ -214,5 +242,5 @@ def build_pipeline(parsed_arguments: argparse.Namespace, progress_display: Progr
         segment_reviewer=None if parsed_arguments.skip_layout_review else LayoutReview(SEGMENT_REVIEW_RULES),
         layout_reviewer=None if parsed_arguments.skip_layout_review else LayoutReview(),
         style_detector=style_stage, flow_checker=flow_checker,
-        text_verifier=None if verify_stage is None else VerificationFeedback(verify_stage, ocr_stage)),
+        text_verifier=build_verification(parsed_arguments, worker_launcher, verify_stage, ocr_stage)),
         build_source_registry(), build_timing_setup(flow_checker, verify_stage, parsed_arguments))
